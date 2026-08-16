@@ -81,7 +81,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text)
 
 
-# Normal text messages
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text.strip().lower()
 
@@ -151,7 +150,6 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(buttons))
 
-    # Normal text messages
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
