@@ -98,11 +98,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please contact us for pricing and service details."
         )
 
-    elif message in ["contact", "phone", "support"]:
-        await update.message.reply_text(
-            "📞 CONTACT\n\n"
-            "Please send your message here.\n"
-            "We will get back to you."
+    elif query.data == "contact":
+    text = (
+        "📞 CONTACT\n\n"
+        "Laxman Rela\n"
+        "Dealer – C.R.I. PUMPS\n"
+        "VAARAAHI ENGINEERING COMPANY\n\n"
+        "📍 D.No. 7-30-24/2, Main Road,\n"
+        "Rajamahendravaram, A.P. - 533101\n\n"
+        "📱 94908 35009"
+    )
         )
 
     elif message in ["help"]:
