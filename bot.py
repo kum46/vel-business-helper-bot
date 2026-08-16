@@ -107,7 +107,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📍 D.No. 7-30-24/2, Main Road,\n"
         "Rajamahendravaram, A.P. - 533101\n\n"
         "📱 94908 35009"
-    
+    )
         )
 
     elif message in ["help"]:
