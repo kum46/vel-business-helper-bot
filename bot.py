@@ -12,296 +12,66 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# BOT TOKEN
-# =========================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-
-# =========================
-# FLASK WEB SERVER
-# =========================
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is missing")
 
 app = Flask(__name__)
-
 
 @app.route("/")
 def home():
     return "Vel Business Helper is running!"
 
+@app.route("/health")
+def health():
+    return "OK"
 
-# =========================
-# MAIN MENU
-# =========================
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-def main_keyboard():
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🛍️ Services", callback_data="services")],
-        [InlineKeyboardButton("🔧 Products", callback_data="products")],
+        [InlineKeyboardButton("🛠 Services", callback_data="services")],
         [InlineKeyboardButton("💰 Price", callback_data="price")],
         [InlineKeyboardButton("📞 Contact", callback_data="contact")],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-# =========================
-# PRODUCTS MENU
-# =========================
-
-def products_keyboard():
-    keyboard = [
-        [InlineKeyboardButton(
-            "🔵 Borewell Submersible Pumps",
-            callback_data="borewell"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Openwell Submersible Pumps",
-            callback_data="openwell"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Centrifugal Monoblock Pumps",
-            callback_data="monoblock"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Self-Priming Pumps",
-            callback_data="selfpriming"
-        )],
-        [InlineKeyboardButton(
-            "🔵 I-Smart Pumps",
-            callback_data="ismart"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Mini Pumps",
-            callback_data="mini"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Pressure Booster Pumps",
-            callback_data="booster"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Swimming Pool Pumps",
-            callback_data="pool"
-        )],
-        [InlineKeyboardButton(
-            "🔵 Waste Water Pumps",
-            callback_data="wastewater"
-        )],
-        [InlineKeyboardButton(
-            "⬅️ Main Menu",
-            callback_data="main"
-        )],
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-# =========================
-# START COMMAND
-# =========================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
     await update.message.reply_text(
         "👋 Welcome to Vel Business Helper!\n\n"
-        "I can help you with simple business information,\n"
-        "services, products, prices and customer support.\n\n"
-        "Please select an option below:",
-        reply_markup=main_keyboard()
+        "నేను మీ business కి సంబంధించిన basic information, "
+        "services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\n"
+        "కింద ఉన్న option ఎంచుకోండి 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-
-# =========================
-# BUTTON HANDLER
-# =========================
-
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-
     await query.answer()
 
-    # =====================
-    # MAIN MENU
-    # =====================
-
-    if query.data == "main":
-
-        await query.message.reply_text(
-            "🏠 MAIN MENU\n\n"
-            "Please select an option:",
-            reply_markup=main_keyboard()
-        )
-
-    # =====================
-    # SERVICES
-    # =====================
-
-    elif query.data == "services":
-
-        await query.message.reply_text(
-            "🛍️ SERVICES\n\n"
-            "• Pump selection guidance\n"
+    if query.data == "services":
+        text = (
+            "🛠 SERVICES\n\n"
+            "• Business information\n"
             "• Product information\n"
-            "• Customer support\n"
-            "• Pump application guidance\n"
-            "• Basic product assistance\n\n"
-            "📞 Contact our dealer for detailed assistance."
+            "• Pump information\n"
+            "• Customer enquiry support\n"
+            "• Contact details\n\n"
+            "మరిన్ని services త్వరలో add చేస్తాము."
         )
-
-    # =====================
-    # PRODUCTS
-    # =====================
-
-    elif query.data == "products":
-
-        await query.message.reply_text(
-            "🔧 C.R.I. PUMPS - PRODUCTS\n\n"
-            "Please select a product category:",
-            reply_markup=products_keyboard()
-        )
-
-    # =====================
-    # BOREWELL
-    # =====================
-
-    elif query.data == "borewell":
-
-        await query.message.reply_text(
-            "🔵 BOREWELL SUBMERSIBLE PUMPS\n\n"
-            "C.R.I. borewell submersible pumps "
-            "are designed for water pumping applications.\n\n"
-            "📌 For exact model, HP, head and availability, "
-            "please contact our dealer."
-        )
-
-    # =====================
-    # OPENWELL
-    # =====================
-
-    elif query.data == "openwell":
-
-        await query.message.reply_text(
-            "🔵 OPENWELL SUBMERSIBLE PUMPS\n\n"
-            "Suitable for openwell water pumping applications.\n\n"
-            "📌 For exact model and specifications, "
-            "please contact our dealer."
-        )
-
-    # =====================
-    # MONOBLOCK
-    # =====================
-
-    elif query.data == "monoblock":
-
-        await query.message.reply_text(
-            "🔵 CENTRIFUGAL MONOBLOCK PUMPS\n\n"
-            "Used for various domestic, agricultural "
-            "and water transfer applications.\n\n"
-            "📌 Contact our dealer for model and HP details."
-        )
-
-    # =====================
-    # SELF PRIMING
-    # =====================
-
-    elif query.data == "selfpriming":
-
-        await query.message.reply_text(
-            "🔵 SELF-PRIMING PUMPS\n\n"
-            "Designed for suitable water pumping applications "
-            "where self-priming operation is required.\n\n"
-            "📌 Contact our dealer for exact model details."
-        )
-
-    # =====================
-    # I-SMART
-    # =====================
-
-    elif query.data == "ismart":
-
-        await query.message.reply_text(
-            "🔵 I-SMART PUMPS\n\n"
-            "C.R.I. I-Smart range of pumps.\n\n"
-            "📌 For exact model, HP and specifications, "
-            "please contact our dealer."
-        )
-
-    # =====================
-    # MINI PUMPS
-    # =====================
-
-    elif query.data == "mini":
-
-        await query.message.reply_text(
-            "🔵 MINI PUMPS\n\n"
-            "Compact pump solutions for suitable applications.\n\n"
-            "📌 Contact our dealer for model and availability."
-        )
-
-    # =====================
-    # PRESSURE BOOSTER
-    # =====================
-
-    elif query.data == "booster":
-
-        await query.message.reply_text(
-            "🔵 PRESSURE BOOSTER PUMPS\n\n"
-            "Used for water pressure boosting applications.\n\n"
-            "📌 Contact our dealer for suitable model selection."
-        )
-
-    # =====================
-    # SWIMMING POOL
-    # =====================
-
-    elif query.data == "pool":
-
-        await query.message.reply_text(
-            "🔵 SWIMMING POOL PUMPS\n\n"
-            "Pump solutions for swimming pool applications.\n\n"
-            "📌 Contact our dealer for model and specifications."
-        )
-
-    # =====================
-    # WASTE WATER
-    # =====================
-
-    elif query.data == "wastewater":
-
-        await query.message.reply_text(
-            "🔵 WASTE WATER PUMPS\n\n"
-            "Pump solutions for suitable waste water applications.\n\n"
-            "📌 Contact our dealer for exact model details."
-        )
-
-    # =====================
-    # PRICE
-    # =====================
-
     elif query.data == "price":
-
-        await query.message.reply_text(
-            "💰 PRICE\n\n"
-            "Please contact us for current pricing,\n"
-            "availability and service details.\n\n"
-            "📞 Dealer: Laxman Rela\n"
-            "📱 94908 35009"
+        text = (
+            "💰 PRICE INFORMATION\n\n"
+            "Product/model మీద price మారుతుంది.\n\n"
+            "మీకు కావాల్సిన product లేదా model పేరు పంపండి.\n"
+            "ఉదాహరణ:\n\n"
+            "CRI pump\n"
+            "1 HP pump\n"
+            "2 HP motor\n"
+            "Openwell pump"
         )
-
-    # =====================
-    # CONTACT
-    # =====================
-
     elif query.data == "contact":
-
         text = (
             "📞 CONTACT\n\n"
             "Laxman Rela\n"
@@ -311,194 +81,82 @@ async def button_handler(
             "Rajamahendravaram, A.P. - 533101\n\n"
             "📱 94908 35009"
         )
-
-        await query.message.reply_text(text)
-
-    # =====================
-    # HELP
-    # =====================
-
-    elif query.data == "help":
-
-        await query.message.reply_text(
-            "❓ HELP\n\n"
-            "You can ask me about:\n\n"
-            "• Services\n"
-            "• Products\n"
-            "• Prices\n"
-            "• Customer support\n"
-            "• Contact details"
-        )
-
-
-# =========================
-# TEXT HANDLER
-# =========================
-
-async def text_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    message = update.message.text.strip().lower()
-
-    # ---------------------
-    # SERVICES
-    # ---------------------
-
-    if message in ["service", "services"]:
-
-        await update.message.reply_text(
-            "🛍️ SERVICES\n\n"
-            "• Pump selection guidance\n"
-            "• Product information\n"
-            "• Customer support\n"
-            "• Pump application guidance\n"
-            "• Basic product assistance"
-        )
-
-    # ---------------------
-    # PRODUCTS
-    # ---------------------
-
-    elif message in [
-        "product",
-        "products",
-        "pump",
-        "pumps",
-        "cri",
-        "cri pumps"
-    ]:
-
-        await update.message.reply_text(
-            "🔧 C.R.I. PUMPS - PRODUCTS\n\n"
-            "Please select a product category:",
-            reply_markup=products_keyboard()
-        )
-
-    # ---------------------
-    # PRICE
-    # ---------------------
-
-    elif message in [
-        "price",
-        "prices",
-        "cost",
-        "rate",
-        "rates"
-    ]:
-
-        await update.message.reply_text(
-            "💰 PRICE\n\n"
-            "Please contact us for current pricing,\n"
-            "availability and service details.\n\n"
-            "📞 Laxman Rela\n"
-            "📱 94908 35009"
-        )
-
-    # ---------------------
-    # CONTACT
-    # ---------------------
-
-    elif message in [
-        "contact",
-        "phone",
-        "mobile",
-        "dealer"
-    ]:
-
-        text = (
-            "📞 CONTACT\n\n"
-            "Laxman Rela\n"
-            "Dealer - C.R.I. PUMPS\n"
-            "VAARAAHI ENGINEERING COMPANY\n\n"
-            "📍 D.No. 7-30-24/2, Main Road,\n"
-            "Rajamahendravaram, A.P. - 533101\n\n"
-            "📱 94908 35009"
-        )
-
-        await update.message.reply_text(text)
-
-    # ---------------------
-    # HELP
-    # ---------------------
-
-    elif message in ["help", "?", "hi", "hello", "hii"]:
-
-        await update.message.reply_text(
-            "👋 Hello! Welcome to Vel Business Helper!\n\n"
-            "How can I help you today?",
-            reply_markup=main_keyboard()
-        )
-
-    # ---------------------
-    # OTHER MESSAGE
-    # ---------------------
-
     else:
-
-        await update.message.reply_text(
-            "🤖 Thanks for your message!\n\n"
-            "I can help with:\n"
-            "• Services\n"
-            "• Products\n"
-            "• Prices\n"
+        text = (
+            "❓ HELP\n\n"
+            "మీకు కావాల్సిన విషయం message గా పంపండి.\n\n"
+            "ఉదాహరణలు:\n"
             "• Contact\n"
-            "• Customer support\n\n"
-            "Please type 'Products', 'Price' or 'Contact'."
+            "• Price\n"
+            "• CRI pump\n"
+            "• 1 HP pump\n"
+            "• Services\n\n"
+            "/start పంపితే main menu వస్తుంది."
         )
 
+    await query.edit_message_text(text)
 
-# =========================
-# RUN BOT
-# =========================
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+
+    if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
+        await update.message.reply_text(
+            "👋 Hello!\n\n"
+            "Vel Business Helper కి Welcome!\n"
+            "/start నొక్కండి."
+        )
+    elif "contact" in text:
+        await update.message.reply_text(
+            "📞 CONTACT\n\n"
+            "Laxman Rela\n"
+            "Dealer - C.R.I. PUMPS\n"
+            "VAARAAHI ENGINEERING COMPANY\n\n"
+            "📍 D.No. 7-30-24/2, Main Road,\n"
+            "Rajamahendravaram, A.P. - 533101\n\n"
+            "📱 94908 35009"
+        )
+    elif "price" in text or "ధర" in text:
+        await update.message.reply_text(
+            "💰 Price తెలుసుకోవడానికి product/model పేరు పంపండి.\n\n"
+            "ఉదాహరణ:\n"
+            "CRI 1 HP\n"
+            "CRI 2 HP\n"
+            "Openwell pump"
+        )
+    elif "pump" in text or "పంప్" in text:
+        await update.message.reply_text(
+            "🔧 PUMP INFORMATION\n\n"
+            "మీకు కావాల్సిన pump details కోసం model పేరు పంపండి.\n\n"
+            "ఉదాహరణ:\n"
+            "1 HP pump\n"
+            "2 HP pump\n"
+            "Openwell pump\n"
+            "Submersible pump"
+        )
+    else:
+        await update.message.reply_text(
+            "🙂 మీ message అందింది.\n\n"
+            "దయచేసి /start పంపి option ఎంచుకోండి.\n\n"
+            "లేదా మీకు కావాల్సిన product పేరు పంపండి."
+        )
 
 def run_bot():
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(
-        CommandHandler("start", start)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )
 
-    application.add_handler(
-        CallbackQueryHandler(button_handler)
-    )
+    print("Vel Business Helper Bot Started")
+    print("Telegram polling is running...")
 
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_handler
-        )
-    )
-
-    application.run_polling(
-        drop_pending_updates=True
-    )
-
-
-# =========================
-# START FLASK + BOT
-# =========================
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    bot_thread = threading.Thread(
-        target=run_bot,
-        daemon=True
-    )
-
-    bot_thread.start()
-
-    port = int(
-        os.environ.get("PORT", 5000)
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    # Telegram polling stays in the MAIN THREAD.
+    run_bot()
