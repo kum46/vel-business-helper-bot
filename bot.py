@@ -1,5 +1,6 @@
 import os
 import threading
+
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -59,21 +60,28 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "contact":
         text = (
             "📞 CONTACT\n\n"
-            "Please send your message here.\n"
-            "We will get back to you."
+            "Laxman Rela\n"
+            "Dealer - C.R.I. PUMPS\n"
+            "VAARAAHI ENGINEERING COMPANY\n\n"
+            "📍 D.No. 7-30-24/2, Main Road,\n"
+            "Rajamahendravaram, A.P. - 533101\n\n"
+            "📱 94908 35009"
         )
 
     else:
         text = (
             "❓ HELP\n\n"
-            "Use the buttons to select a service.\n"
-            "You can also type your question."
+            "You can ask me about:\n"
+            "• Services\n"
+            "• Products\n"
+            "• Prices\n"
+            "• Customer support"
         )
 
     await query.edit_message_text(text)
 
 
-# 👇 Normal text messages
+# Normal text messages
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text.strip().lower()
 
@@ -98,16 +106,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please contact us for pricing and service details."
         )
 
-    elif query.data == "contact":
-    text = (
-        "📞 CONTACT\n\n"
-        "Laxman Rela\n"
-        "Dealer – C.R.I. PUMPS\n"
-        "VAARAAHI ENGINEERING COMPANY\n\n"
-        "📍 D.No. 7-30-24/2, Main Road,\n"
-        "Rajamahendravaram, A.P. - 533101\n\n"
-        "📱 94908 35009"
-    )
+    elif message in ["contact", "phone", "support"]:
+        await update.message.reply_text(
+            "📞 CONTACT\n\n"
+            "Laxman Rela\n"
+            "Dealer - C.R.I. PUMPS\n"
+            "VAARAAHI ENGINEERING COMPANY\n\n"
+            "📍 D.No. 7-30-24/2, Main Road,\n"
+            "Rajamahendravaram, A.P. - 533101\n\n"
+            "📱 94908 35009"
         )
 
     elif message in ["help"]:
