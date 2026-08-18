@@ -2,11 +2,10 @@ import os
 import asyncio
 import threading
 import logging
-import signal
-import time
 
-from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask, request
+from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -28,6 +27,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("VelBusinessHelper")
 
+# --- Flask Main Web Server (Render main process) ---
 app = Flask(__name__)
 
 @app.route("/")
@@ -38,9 +38,7 @@ def home():
 def health():
     return "OK"
 
-telegram_stop_event = threading.Event()
-
-
+# --- Existing Telegram handlers - UNCHANGED ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -172,138 +170,130 @@ async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_T
     )
 
 
-def polling_error(error):
-    logger.error(
-        "Telegram polling error: %s",
-        error,
-        exc_info=error,
-    )
+# --- Telegram Application (Webhook mode - NO POLLING) ---
+telegram_app = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
+)
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(button_handler))
+telegram_app.add_handler(
+    MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
+)
+telegram_app.add_error_handler(telegram_error_handler)
 
 
-async def telegram_main():
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+# --- PERSISTENT ASYNCIO LOOP FOR TELEGRAM (FIX FOR EVENT-LOOP ISSUE) ---
+# Render + Flask is sync, but python-telegram-bot is async.
+# So we create ONE persistent loop in a daemon thread and run everything there.
+telegram_loop = asyncio.new_event_loop()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
-    )
-    application.add_error_handler(telegram_error_handler)
+def _run_telegram_loop():
+    asyncio.set_event_loop(telegram_loop)
+    telegram_loop.run_forever()
 
-    logger.info("Initializing Telegram application...")
+telegram_thread = threading.Thread(
+    target=_run_telegram_loop,
+    name="TelegramLoopThread",
+    daemon=True,
+)
+telegram_thread.start()
 
-    await application.initialize()
+async def _init_telegram():
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+async def _shutdown_telegram():
+    try:
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+    except Exception:
+        pass
+
+# Initialize telegram_app inside persistent loop (not asyncio.run)
+try:
+    future = asyncio.run_coroutine_threadsafe(_init_telegram(), telegram_loop)
+    future.result(timeout=30)
+    logger.info("Telegram application initialized in persistent loop - webhook mode ready.")
+except Exception:
+    logger.exception("Failed to initialize Telegram application in persistent loop")
+
+# --- Webhook endpoint ---
+WEBHOOK_PATH = "/telegram-webhook"
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
+    try:
+        json_data = request.get_json(force=True)
+        if not json_data:
+            return "OK", 200
+
+        update = Update.de_json(json_data, telegram_app.bot)
+
+        # Process update in persistent loop - NO new asyncio.run()
+        async def _process():
+            await telegram_app.process_update(update)
+
+        future = asyncio.run_coroutine_threadsafe(_process(), telegram_loop)
+        future.result(timeout=30)
+
+    except Exception:
+        logger.exception("Error in webhook endpoint")
+
+    return "OK", 200
+
+
+# --- Webhook Registration (safe, no deleteWebhook) ---
+def _get_webhook_url():
+    full_url = os.getenv("WEBHOOK_URL")
+    if full_url:
+        return full_url
+
+    base_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_BASE_URL")
+    if base_url:
+        base_url = base_url.rstrip("/")
+        return f"{base_url}{WEBHOOK_PATH}"
+
+    return None
+
+
+def _register_webhook_if_needed():
+    webhook_url = _get_webhook_url()
+    if not webhook_url:
+        logger.info("WEBHOOK_URL / RENDER_EXTERNAL_URL not set, skipping webhook registration.")
+        return
 
     try:
-        logger.info("Deleting Telegram webhook...")
+        async def _set():
+            current = await telegram_app.bot.get_webhook_info()
+            if current.url == webhook_url:
+                logger.info("Webhook already correctly configured: %s", webhook_url)
+                return
+            await telegram_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            logger.info("Webhook set to: %s", webhook_url)
 
-        await application.bot.delete_webhook(
-            drop_pending_updates=True
-        )
+        future = asyncio.run_coroutine_threadsafe(_set(), telegram_loop)
+        future.result(timeout=30)
+    except Exception:
+        logger.exception("Failed to set webhook, but Flask will continue running")
 
-        logger.info("Telegram webhook deleted.")
+_register_webhook_if_needed()
 
-        await application.start()
-
-        logger.info("Telegram application started.")
-
-        if application.updater is None:
-            raise RuntimeError("Telegram updater is not available.")
-
-        await application.updater.start_polling(
-            drop_pending_updates=False,
-            error_callback=polling_error,
-        )
-
-        logger.info("Telegram polling is running...")
-
-        await asyncio.to_thread(
-            telegram_stop_event.wait
-        )
-
-    finally:
-        logger.info("Stopping Telegram polling...")
-
-        if application.updater is not None:
-            try:
-                await application.updater.stop()
-            except Exception:
-                logger.exception("Error while stopping Telegram updater")
-
-        try:
-            await application.stop()
-        except Exception:
-            logger.exception("Error while stopping Telegram application")
-
-        try:
-            await application.shutdown()
-        except Exception:
-            logger.exception("Error while shutting down Telegram application")
-
-        logger.info("Telegram bot shutdown completed.")
-
-
-def telegram_worker():
-    logger.info("Telegram background worker starting...")
-
-    while not telegram_stop_event.is_set():
-        try:
-            asyncio.run(telegram_main())
-        except Exception:
-            logger.exception("Telegram background worker crashed.")
-            if telegram_stop_event.is_set():
-                break
-            time.sleep(5)
-            continue
-        else:
-            break
-
-    logger.info("Telegram background worker stopped.")
-
-
-def shutdown_signal(signum, frame):
-    logger.info("Shutdown signal received: %s", signum)
-    telegram_stop_event.set()
-    raise SystemExit(0)
-
-
+# --- Final architecture: Flask Main Web Server on PORT ---
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, shutdown_signal)
-    signal.signal(signal.SIGINT, shutdown_signal)
-
-    telegram_thread = threading.Thread(
-        target=telegram_worker,
-        name="TelegramBotThread",
-        daemon=True,
-    )
-
-    telegram_thread.start()
-
-    logger.info("Telegram background worker started.")
-
     PORT = int(os.environ.get("PORT", "10000"))
-
-    logger.info(
-        "Starting Flask HTTP server on 0.0.0.0:%s",
-        PORT
-    )
-
+    logger.info("Starting Flask Main Web Server on 0.0.0.0:%s", PORT)
     try:
         app.run(
             host="0.0.0.0",
             port=PORT,
             use_reloader=False,
         )
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Flask server stopping...")
     finally:
-        telegram_stop_event.set()
-
-        if telegram_thread.is_alive():
-            telegram_thread.join(timeout=10)
-
-        logger.info("Vel Business Helper stopped.")
+        try:
+            future = asyncio.run_coroutine_threadsafe(_shutdown_telegram(), telegram_loop)
+            future.result(timeout=10)
+        except Exception:
+            pass
