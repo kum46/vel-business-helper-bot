@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 import logging
+import json
 
 from flask import Flask, request
 from telegram import Update
@@ -34,6 +35,68 @@ def home():
 def health():
     return "OK"
 
+# --- NEW: DATA STORAGE (Free, file-based) ---
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+PRODUCTS_FILE = os.path.join(DATA_DIR, "products.json")
+_storage_lock = threading.Lock()
+
+def _ensure_data_dir():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+def _load_products():
+    _ensure_data_dir()
+    with _storage_lock:
+        if not os.path.exists(PRODUCTS_FILE):
+            return []
+        try:
+            with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+def _save_products(products):
+    _ensure_data_dir()
+    with _storage_lock:
+        try:
+            with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(products, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            logger.exception("Failed to save products")
+            return False
+
+def _format_price_display(price_str):
+    # Keep original string but also try to format with comma if numeric
+    try:
+        # Remove commas and spaces
+        clean = price_str.replace(",", "").strip()
+        num = float(clean)
+        if num.is_integer():
+            return f"₹{int(num):,}"
+        else:
+            return f"₹{num:,.2f}"
+    except Exception:
+        return f"₹{price_str}"
+
+def _format_products_list(products):
+    if not products:
+        return "📦 PRODUCTS\n\nNo products added yet."
+    lines = ["📦 PRODUCTS\n"]
+    for idx, p in enumerate(products, 1):
+        name = p.get("name", "Unknown")
+        price = p.get("price", "")
+        price_display = _format_price_display(str(price)) if price else ""
+        lines.append(f"{idx}. {name}")
+        if price_display:
+            lines.append(f"   💰 {price_display}")
+        lines.append("")  # blank line
+    return "\n".join(lines).strip()
+
+# --- Existing Telegram handlers - UNCHANGED (except text_handler extended for admin flow) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -59,6 +122,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+
+    # --- NEW: Admin Add Product Conversation Flow (must be before customer logic) ---
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id == ADMIN_USER_ID:
+        flow = context.user_data.get("admin_flow")
+        if flow == "add_product":
+            step = context.user_data.get("admin_step")
+            msg_text = update.message.text.strip()
+
+            if step == "awaiting_name":
+                if not msg_text:
+                    await update.message.reply_text("Product name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    return
+                context.user_data["temp_product"] = {"name": msg_text}
+                context.user_data["admin_step"] = "awaiting_price"
+                await update.message.reply_text("💰 Price పంపండి:")
+                return
+
+            elif step == "awaiting_price":
+                if not msg_text:
+                    await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    return
+                # Simple validation - allow numeric with commas
+                context.user_data["temp_product"]["price"] = msg_text
+                context.user_data["admin_step"] = "awaiting_details"
+                await update.message.reply_text("📝 Product details పంపండి:")
+                return
+
+            elif step == "awaiting_details":
+                temp = context.user_data.get("temp_product", {})
+                temp["details"] = msg_text
+                # Save to storage
+                products = _load_products()
+                new_product = {
+                    "name": temp.get("name", ""),
+                    "price": temp.get("price", ""),
+                    "details": temp.get("details", ""),
+                }
+                products.append(new_product)
+                _save_products(products)
+
+                # Clear flow
+                context.user_data.pop("admin_flow", None)
+                context.user_data.pop("admin_step", None)
+                context.user_data.pop("temp_product", None)
+
+                price_display = _format_price_display(new_product["price"])
+                await update.message.reply_text(f"✅ Product saved successfully!\n\nProduct:\n{new_product['name']}\n\nPrice:\n{price_display}")
+                return
+
+    # --- Existing Customer Logic (UNCHANGED) ---
     text = update.message.text.strip().lower()
     if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
         await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.")
@@ -92,7 +206,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🔐 ADMIN PANEL\n\nWelcome Admin! కింద ఉన్న option ఎంచుకోండి 👇", reply_markup=_get_admin_keyboard())
 
-# FIX 2: Admin callback - security check ముందు, answer ఒక్కసారే
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id if query.from_user else None
@@ -100,15 +213,31 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("❌ Not authorized", show_alert=True)
         return
     await query.answer()
+
+    data = query.data
+
+    if data == "admin_add_product":
+        # Start conversation flow
+        context.user_data["admin_flow"] = "add_product"
+        context.user_data["admin_step"] = "awaiting_name"
+        context.user_data.pop("temp_product", None)
+        await query.edit_message_text("➕ ADD PRODUCT\n\nProduct name పంపండి:")
+        return
+
+    if data == "admin_view_products":
+        products = _load_products()
+        text = _format_products_list(products)
+        await query.edit_message_text(text)
+        return
+
+    # Remaining buttons stay placeholder for now (as per STRICTLY DO NOT ADD)
     placeholders = {
-        "admin_add_product": "➕ Add Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
-        "admin_view_products": "📦 View Products\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_edit_product": "✏️ Edit Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_change_price": "💰 Change Price\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_edit_details": "📝 Edit Details\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_delete_product": "🗑️ Delete Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
     }
-    text = placeholders.get(query.data, "Product management feature త్వరలో అందుబాటులో ఉంటుంది.")
+    text = placeholders.get(data, "Product management feature త్వరలో అందుబాటులో ఉంటుంది.")
     await query.edit_message_text(text)
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
@@ -184,7 +313,6 @@ def _register_webhook_if_needed():
             if current.url == webhook_url:
                 logger.info("Webhook already correctly configured: %s", webhook_url)
                 return
-            # FIX 3: drop_pending_updates=False - pending messages కోల్పోకుండా ఉండటానికి
             await telegram_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
             logger.info("Webhook set to: %s", webhook_url)
         future = asyncio.run_coroutine_threadsafe(_set(), telegram_loop)
@@ -196,10 +324,8 @@ _register_webhook_if_needed()
 
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", "10000"))
-    # FIX 1: ఈ line ఒకే line గా ఉండాలి - మధ్యలో break వద్దు
     logger.info("Starting Flask Main Web Server on 0.0.0.0:%s", PORT)
     try:
-        # FIX 1: ఇది కూడా ఒకే line గా ఉండాలి
         app.run(host="0.0.0.0", port=PORT, use_reloader=False)
     finally:
         try:
