@@ -2,7 +2,6 @@ import os
 import asyncio
 import threading
 import logging
-import json
 
 from flask import Flask, request
 from telegram import Update
@@ -35,44 +34,149 @@ def home():
 def health():
     return "OK"
 
-# --- NEW: DATA STORAGE (Free, file-based) ---
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-PRODUCTS_FILE = os.path.join(DATA_DIR, "products.json")
-_storage_lock = threading.Lock()
+# --- NEW: TURSO SQLite/libSQL STORAGE (Replaces products.json) ---
+_turso_client = None
+_turso_lock = threading.Lock()
+_turso_initialized = False
 
-def _ensure_data_dir():
+def _get_turso_credentials():
+    # IMPORTANT: Use os.getenv only, no hard-code, no logs of secrets
+    url = os.getenv("TURSO_DATABASE_URL")
+    token = os.getenv("TURSO_AUTH_TOKEN")
+    return url, token
+
+def _get_turso_client():
+    global _turso_client
+    url, token = _get_turso_credentials()
+    if not url or not token:
+        return None
+
+    with _turso_lock:
+        if _turso_client is not None:
+            return _turso_client
+        try:
+            # libsql is the official Turso Python SDK
+            try:
+                import libsql
+                _turso_client = libsql.connect(database=url, auth_token=token)
+            except ImportError:
+                # Fallback for older package name libsql_client
+                import libsql_client
+                _turso_client = libsql_client.create_client_sync(url=url, auth_token=token)
+            logger.info("Turso client connected")
+            return _turso_client
+        except Exception:
+            logger.exception("Failed to connect to Turso database - check TURSO_DATABASE_URL / TURSO_AUTH_TOKEN")
+            return None
+
+def _init_turso_db():
+    global _turso_initialized
+    if _turso_initialized:
+        return True
+
+    client = _get_turso_client()
+    if client is None:
+        logger.error("Turso credentials missing or client failed - products storage will fail until env vars are set")
+        return False
+
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
+        with _turso_lock:
+            client.execute("""
+                CREATE TABLE IF NOT EXISTS products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    details TEXT
+                )
+            """)
+            client.commit()
+        _turso_initialized = True
+        logger.info("Turso products table ensured")
+        _migrate_json_if_needed()
+        return True
     except Exception:
-        pass
+        logger.exception("Failed to initialize Turso products table")
+        return False
+
+def _migrate_json_if_needed():
+    """Safe migration: If data/products.json exists and Turso table is empty, import it."""
+    try:
+        json_path = os.path.join(os.path.dirname(__file__), "data", "products.json")
+        if not os.path.exists(json_path):
+            return
+        import json as _json
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if not isinstance(data, list) or not data:
+            return
+
+        client = _get_turso_client()
+        if client is None:
+            return
+
+        with _turso_lock:
+            cur = client.execute("SELECT COUNT(*) FROM products")
+            count = cur.fetchone()[0] if cur else 0
+            if count > 0:
+                logger.info("Turso already has products, skipping JSON migration")
+                return
+            for p in data:
+                name = p.get("name", "").strip()
+                price = str(p.get("price", "")).strip()
+                details = p.get("details", "").strip()
+                if not name:
+                    continue
+                client.execute("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
+            client.commit()
+            logger.info("Migrated %s products from products.json to Turso", len(data))
+    except Exception:
+        logger.exception("JSON to Turso migration failed - continuing without migration")
 
 def _load_products():
-    _ensure_data_dir()
-    with _storage_lock:
-        if not os.path.exists(PRODUCTS_FILE):
-            return []
-        try:
-            with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-        except Exception:
-            return []
+    client = _get_turso_client()
+    if client is None:
+        logger.error("Turso client not available for _load_products")
+        return []
+    try:
+        with _turso_lock:
+            rs = client.execute("SELECT id, name, price, details FROM products ORDER BY id ASC")
+            rows = rs.fetchall() if hasattr(rs, 'fetchall') else rs
+            products = []
+            for r in rows:
+                # libsql returns tuple or Row object
+                try:
+                    pid, name, price, details = r[0], r[1], r[2], r[3]
+                except Exception:
+                    pid = r["id"] if isinstance(r, dict) else getattr(r, "id", 0)
+                    name = r["name"] if isinstance(r, dict) else getattr(r, "name", "")
+                    price = r["price"] if isinstance(r, dict) else getattr(r, "price", "")
+                    details = r["details"] if isinstance(r, dict) else getattr(r, "details", "")
+                products.append({"id": pid, "name": name, "price": price, "details": details})
+            return products
+    except Exception:
+        logger.exception("Failed to load products from Turso")
+        return []
 
-def _save_products(products):
-    _ensure_data_dir()
-    with _storage_lock:
-        try:
-            with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(products, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception:
-            logger.exception("Failed to save products")
-            return False
+def _add_product_to_turso(name, price, details):
+    client = _get_turso_client()
+    if client is None:
+        logger.error("Turso client not available for _add_product")
+        return None
+    try:
+        with _turso_lock:
+            client.execute("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
+            client.commit()
+            # Get last inserted id
+            rs = client.execute("SELECT last_insert_rowid()")
+            row = rs.fetchone() if hasattr(rs, 'fetchone') else None
+            new_id = row[0] if row else None
+            return new_id
+    except Exception:
+        logger.exception("Failed to insert product into Turso")
+        return None
 
 def _format_price_display(price_str):
-    # Keep original string but also try to format with comma if numeric
     try:
-        # Remove commas and spaces
         clean = price_str.replace(",", "").strip()
         num = float(clean)
         if num.is_integer():
@@ -93,10 +197,10 @@ def _format_products_list(products):
         lines.append(f"{idx}. {name}")
         if price_display:
             lines.append(f"   💰 {price_display}")
-        lines.append("")  # blank line
+        lines.append("")
     return "\n".join(lines).strip()
 
-# --- Existing Telegram handlers - UNCHANGED (except text_handler extended for admin flow) ---
+# --- Existing Telegram handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -123,7 +227,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    # --- NEW: Admin Add Product Conversation Flow (must be before customer logic) ---
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
@@ -144,7 +247,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not msg_text:
                     await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
                     return
-                # Simple validation - allow numeric with commas
                 context.user_data["temp_product"]["price"] = msg_text
                 context.user_data["admin_step"] = "awaiting_details"
                 await update.message.reply_text("📝 Product details పంపండి:")
@@ -153,26 +255,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif step == "awaiting_details":
                 temp = context.user_data.get("temp_product", {})
                 temp["details"] = msg_text
-                # Save to storage
-                products = _load_products()
-                new_product = {
-                    "name": temp.get("name", ""),
-                    "price": temp.get("price", ""),
-                    "details": temp.get("details", ""),
-                }
-                products.append(new_product)
-                _save_products(products)
 
-                # Clear flow
+                # Save to Turso
+                new_id = _add_product_to_turso(temp.get("name", ""), temp.get("price", ""), temp.get("details", ""))
+                if new_id is None:
+                    await update.message.reply_text("❌ Database connection failed. Product save కాలేదు. Turso credentials check చేసి మళ్ళీ try చేయండి.")
+                    return
+
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
                 context.user_data.pop("temp_product", None)
 
-                price_display = _format_price_display(new_product["price"])
-                await update.message.reply_text(f"✅ Product saved successfully!\n\nProduct:\n{new_product['name']}\n\nPrice:\n{price_display}")
+                price_display = _format_price_display(temp.get("price", ""))
+                await update.message.reply_text(f"✅ Product saved successfully!\n\nProduct:\n{temp.get('name')}\n\nPrice:\n{price_display}")
                 return
 
-    # --- Existing Customer Logic (UNCHANGED) ---
     text = update.message.text.strip().lower()
     if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
         await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.")
@@ -213,24 +310,18 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("❌ Not authorized", show_alert=True)
         return
     await query.answer()
-
     data = query.data
-
     if data == "admin_add_product":
-        # Start conversation flow
         context.user_data["admin_flow"] = "add_product"
         context.user_data["admin_step"] = "awaiting_name"
         context.user_data.pop("temp_product", None)
         await query.edit_message_text("➕ ADD PRODUCT\n\nProduct name పంపండి:")
         return
-
     if data == "admin_view_products":
         products = _load_products()
         text = _format_products_list(products)
         await query.edit_message_text(text)
         return
-
-    # Remaining buttons stay placeholder for now (as per STRICTLY DO NOT ADD)
     placeholders = {
         "admin_edit_product": "✏️ Edit Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_change_price": "💰 Change Price\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
@@ -248,6 +339,7 @@ telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 telegram_app.add_error_handler(telegram_error_handler)
 
+# --- Persistent Loop & Turso Init (Architecture unchanged) ---
 telegram_loop = asyncio.new_event_loop()
 
 def _run_telegram_loop():
@@ -267,6 +359,9 @@ async def _shutdown_telegram():
         await telegram_app.shutdown()
     except Exception:
         pass
+
+# Initialize Turso DB before Telegram app start (safe, no secrets logged)
+_init_turso_db()
 
 try:
     future = asyncio.run_coroutine_threadsafe(_init_telegram(), telegram_loop)
