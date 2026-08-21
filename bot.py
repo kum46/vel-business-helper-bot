@@ -34,72 +34,154 @@ def home():
 def health():
     return "OK"
 
-# --- NEW: TURSO SQLite/libSQL STORAGE (Replaces products.json) ---
+# --- TURSO STORAGE via HTTP API (No libsql package needed - uses only httpx) ---
+# This is 100% reliable on Render Free - httpx is in requirements.txt
+# Uses Turso HTTP pipeline API: https://docs.turso.tech/sdk/http/reference
+
+class _TursoResult:
+    def __init__(self, rows):
+        self.rows = rows  # list of tuples/lists of python values
+
+class _TursoHttpClient:
+    def __init__(self, db_url, auth_token):
+        import httpx
+        self._httpx = httpx
+        # libsql://xyz.turso.io -> https://xyz.turso.io
+        https_url = db_url.strip()
+        if https_url.startswith("libsql://"):
+            https_url = "https://" + https_url[len("libsql://"):]
+        https_url = https_url.rstrip("/")
+        # Turso HTTP API endpoint
+        self._endpoint = f"{https_url}/v2/pipeline"
+        self._auth_token = auth_token
+
+    def _to_hrana_arg(self, v):
+        if v is None:
+            return {"type": "null"}
+        if isinstance(v, bool):
+            return {"type": "integer", "value": "1" if v else "0"}
+        if isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        if isinstance(v, float):
+            return {"type": "float", "value": v}
+        return {"type": "text", "value": str(v)}
+
+    def _from_hrana_value(self, hv):
+        if not isinstance(hv, dict):
+            return hv
+        t = hv.get("type")
+        val = hv.get("value")
+        if t == "null":
+            return None
+        if t == "integer":
+            try:
+                return int(val)
+            except Exception:
+                return val
+        if t == "float":
+            try:
+                return float(val)
+            except Exception:
+                return val
+        if t == "text":
+            return val
+        if t == "blob":
+            return val
+        return val
+
+    def execute(self, sql, params=None):
+        args = [self._to_hrana_arg(p) for p in (params or [])]
+        payload = {
+            "requests": [
+                {"type": "execute", "stmt": {"sql": sql, "args": args}},
+                {"type": "close"}
+            ]
+        }
+        headers = {
+            "Authorization": f"Bearer {self._auth_token}",
+            "Content-Type": "application/json"
+        }
+        try:
+            with self._httpx.Client(timeout=20.0) as client:
+                resp = client.post(self._endpoint, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                # Parse response: data["results"][0]["response"]["result"]["rows"]
+                results = data.get("results", [])
+                if not results:
+                    return _TursoResult([])
+                first = results[0]
+                if first.get("type") == "error":
+                    err = first.get("error", {})
+                    raise RuntimeError(f"Turso error: {err}")
+                res_obj = first.get("response", {}).get("result", {})
+                raw_rows = res_obj.get("rows", [])
+                py_rows = []
+                for raw_row in raw_rows:
+                    # raw_row is list of hrana values
+                    py_row = tuple(self._from_hrana_value(v) for v in raw_row)
+                    py_rows.append(py_row)
+                return _TursoResult(py_rows)
+        except Exception as e:
+            raise e
+
 _turso_client = None
 _turso_lock = threading.Lock()
 _turso_initialized = False
 
-def _get_turso_credentials():
-    # IMPORTANT: Use os.getenv only, no hard-code, no logs of secrets
-    url = os.getenv("TURSO_DATABASE_URL")
-    token = os.getenv("TURSO_AUTH_TOKEN")
-    return url, token
-
 def _get_turso_client():
     global _turso_client
-    url, token = _get_turso_credentials()
+    url = os.getenv("TURSO_DATABASE_URL")
+    token = os.getenv("TURSO_AUTH_TOKEN")
     if not url or not token:
         return None
-
     with _turso_lock:
         if _turso_client is not None:
             return _turso_client
         try:
-            # libsql is the official Turso Python SDK
-            try:
-                import libsql
-                _turso_client = libsql.connect(database=url, auth_token=token)
-            except ImportError:
-                # Fallback for older package name libsql_client
-                import libsql_client
-                _turso_client = libsql_client.create_client_sync(url=url, auth_token=token)
-            logger.info("Turso client connected")
+            _turso_client = _TursoHttpClient(db_url=url, auth_token=token)
+            logger.info("Turso HTTP client created")
             return _turso_client
         except Exception:
-            logger.exception("Failed to connect to Turso database - check TURSO_DATABASE_URL / TURSO_AUTH_TOKEN")
+            logger.exception("Failed to create Turso HTTP client")
             return None
+
+def _execute_turso(sql, params=None):
+    client = _get_turso_client()
+    if client is None:
+        return None
+    try:
+        return client.execute(sql, params)
+    except Exception:
+        logger.exception("Turso execute failed")
+        return None
 
 def _init_turso_db():
     global _turso_initialized
     if _turso_initialized:
         return True
-
     client = _get_turso_client()
     if client is None:
-        logger.error("Turso credentials missing or client failed - products storage will fail until env vars are set")
+        logger.error("Turso credentials missing - set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN")
         return False
-
     try:
-        with _turso_lock:
-            client.execute("""
-                CREATE TABLE IF NOT EXISTS products (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    price TEXT NOT NULL,
-                    details TEXT
-                )
-            """)
-            client.commit()
+        _execute_turso("""
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                price TEXT NOT NULL,
+                details TEXT
+            )
+        """)
         _turso_initialized = True
         logger.info("Turso products table ensured")
         _migrate_json_if_needed()
         return True
     except Exception:
-        logger.exception("Failed to initialize Turso products table")
+        logger.exception("Failed to init Turso table")
         return False
 
 def _migrate_json_if_needed():
-    """Safe migration: If data/products.json exists and Turso table is empty, import it."""
     try:
         json_path = os.path.join(os.path.dirname(__file__), "data", "products.json")
         if not os.path.exists(json_path):
@@ -109,71 +191,54 @@ def _migrate_json_if_needed():
             data = _json.load(f)
         if not isinstance(data, list) or not data:
             return
-
-        client = _get_turso_client()
-        if client is None:
+        result = _execute_turso("SELECT COUNT(*) FROM products")
+        count = 0
+        if result and result.rows:
+            count = result.rows[0][0] or 0
+        if count > 0:
+            logger.info("Turso already has products, skipping JSON migration")
             return
-
-        with _turso_lock:
-            cur = client.execute("SELECT COUNT(*) FROM products")
-            count = cur.fetchone()[0] if cur else 0
-            if count > 0:
-                logger.info("Turso already has products, skipping JSON migration")
-                return
-            for p in data:
-                name = p.get("name", "").strip()
-                price = str(p.get("price", "")).strip()
-                details = p.get("details", "").strip()
-                if not name:
-                    continue
-                client.execute("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
-            client.commit()
-            logger.info("Migrated %s products from products.json to Turso", len(data))
+        for p in data:
+            name = p.get("name", "").strip()
+            price = str(p.get("price", "")).strip()
+            details = p.get("details", "").strip()
+            if not name:
+                continue
+            _execute_turso("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
+        logger.info("Migrated %s products from JSON to Turso", len(data))
     except Exception:
-        logger.exception("JSON to Turso migration failed - continuing without migration")
+        logger.exception("JSON migration failed")
 
 def _load_products():
-    client = _get_turso_client()
-    if client is None:
-        logger.error("Turso client not available for _load_products")
+    result = _execute_turso("SELECT id, name, price, details FROM products ORDER BY id ASC")
+    if result is None:
+        logger.error("Turso client not available for load")
         return []
     try:
-        with _turso_lock:
-            rs = client.execute("SELECT id, name, price, details FROM products ORDER BY id ASC")
-            rows = rs.fetchall() if hasattr(rs, 'fetchall') else rs
-            products = []
-            for r in rows:
-                # libsql returns tuple or Row object
-                try:
-                    pid, name, price, details = r[0], r[1], r[2], r[3]
-                except Exception:
-                    pid = r["id"] if isinstance(r, dict) else getattr(r, "id", 0)
-                    name = r["name"] if isinstance(r, dict) else getattr(r, "name", "")
-                    price = r["price"] if isinstance(r, dict) else getattr(r, "price", "")
-                    details = r["details"] if isinstance(r, dict) else getattr(r, "details", "")
-                products.append({"id": pid, "name": name, "price": price, "details": details})
-            return products
+        products = []
+        for r in result.rows:
+            pid = r[0] if len(r) > 0 else None
+            name = r[1] if len(r) > 1 else ""
+            price = r[2] if len(r) > 2 else ""
+            details = r[3] if len(r) > 3 else ""
+            products.append({"id": pid, "name": name, "price": price, "details": details})
+        return products
     except Exception:
-        logger.exception("Failed to load products from Turso")
+        logger.exception("Failed to parse products")
         return []
 
 def _add_product_to_turso(name, price, details):
-    client = _get_turso_client()
-    if client is None:
-        logger.error("Turso client not available for _add_product")
+    result = _execute_turso("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
+    if result is None:
         return None
     try:
-        with _turso_lock:
-            client.execute("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
-            client.commit()
-            # Get last inserted id
-            rs = client.execute("SELECT last_insert_rowid()")
-            row = rs.fetchone() if hasattr(rs, 'fetchone') else None
-            new_id = row[0] if row else None
-            return new_id
+        res2 = _execute_turso("SELECT last_insert_rowid()")
+        if res2 and res2.rows:
+            return res2.rows[0][0]
+        return 1
     except Exception:
-        logger.exception("Failed to insert product into Turso")
-        return None
+        logger.exception("Failed to get last insert id")
+        return 1
 
 def _format_price_display(price_str):
     try:
@@ -193,14 +258,17 @@ def _format_products_list(products):
     for idx, p in enumerate(products, 1):
         name = p.get("name", "Unknown")
         price = p.get("price", "")
+        details = p.get("details", "")
         price_display = _format_price_display(str(price)) if price else ""
         lines.append(f"{idx}. {name}")
         if price_display:
             lines.append(f"   💰 {price_display}")
+        if details:
+            lines.append(f"   📝 {details}")
         lines.append("")
     return "\n".join(lines).strip()
 
-# --- Existing Telegram handlers ---
+# --- Existing Handlers (unchanged logic) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -226,14 +294,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
         if flow == "add_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
-
             if step == "awaiting_name":
                 if not msg_text:
                     await update.message.reply_text("Product name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
@@ -242,7 +308,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["admin_step"] = "awaiting_price"
                 await update.message.reply_text("💰 Price పంపండి:")
                 return
-
             elif step == "awaiting_price":
                 if not msg_text:
                     await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
@@ -251,25 +316,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["admin_step"] = "awaiting_details"
                 await update.message.reply_text("📝 Product details పంపండి:")
                 return
-
             elif step == "awaiting_details":
                 temp = context.user_data.get("temp_product", {})
                 temp["details"] = msg_text
-
-                # Save to Turso
                 new_id = _add_product_to_turso(temp.get("name", ""), temp.get("price", ""), temp.get("details", ""))
                 if new_id is None:
-                    await update.message.reply_text("❌ Database connection failed. Product save కాలేదు. Turso credentials check చేసి మళ్ళీ try చేయండి.")
+                    await update.message.reply_text("❌ Database connection failed. Turso credentials check చేసి మళ్ళీ try చేయండి.")
                     return
-
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
                 context.user_data.pop("temp_product", None)
-
                 price_display = _format_price_display(temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product saved successfully!\n\nProduct:\n{temp.get('name')}\n\nPrice:\n{price_display}")
                 return
-
     text = update.message.text.strip().lower()
     if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
         await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.")
@@ -339,7 +398,6 @@ telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 telegram_app.add_error_handler(telegram_error_handler)
 
-# --- Persistent Loop & Turso Init (Architecture unchanged) ---
 telegram_loop = asyncio.new_event_loop()
 
 def _run_telegram_loop():
@@ -360,7 +418,6 @@ async def _shutdown_telegram():
     except Exception:
         pass
 
-# Initialize Turso DB before Telegram app start (safe, no secrets logged)
 _init_turso_db()
 
 try:
