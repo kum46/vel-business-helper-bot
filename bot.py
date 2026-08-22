@@ -301,7 +301,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
         [InlineKeyboardButton("💰 Price", callback_data="price")],
-        [InlineKeyboardButton("📞 Contact", callback_data="contact")],
+        [InlineKeyboardButton("🤖 About This Bot", callback_data="about")],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
     await update.message.reply_text("👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -313,8 +313,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "🛠 SERVICES\n\n• Business information\n• Product information\n• Pump information\n• Customer enquiry support\n• Contact details\n\nమరిన్ని services త్వరలో add చేస్తాము."
     elif query.data == "price":
         text = "💰 PRICE INFORMATION\n\nProduct/model మీద price మారుతుంది.\n\nమీకు కావాల్సిన product లేదా model పేరు పంపండి.\n\nఉదాహరణ:\nCRI pump\n1 HP pump\n2 HP motor\nOpenwell pump"
-    elif query.data == "contact":
-        text = "📞 CONTACT\n\nLaxman Rela\nDealer - C.R.I. PUMPS\nVAARAAHI ENGINEERING COMPANY\n\n📍 D.No. 7-30-24/2, Main Road,\nRajamahendravaram, A.P. - 533101\n\n📱 94908 35009"
+    elif query.data == "about":
+        text = (
+            "🤖 VEL BUSINESS HELPER\n\n"
+            "A professional Telegram Business Helper Bot designed to help businesses manage products and provide information to customers.\n\n"
+            "✨ FEATURES\n\n"
+            "• 📦 Add & manage products\n"
+            "• 💰 Manage product prices\n"
+            "• 📝 Add & edit product details\n"
+            "• 🔎 Customer product information\n"
+            "• 🗑️ Delete products\n"
+            "• 🗄️ Cloud database storage\n"
+            "• 🔐 Protected Admin Panel\n"
+            "• 📱 Customer-friendly menu\n"
+            "• ⚡ Automated responses\n"
+            "• 🔄 Business information management\n\n"
+            "More features can be customized according to your business needs."
+        )
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    elif query.data == "back_to_start":
+        text = "👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇"
+        keyboard = [
+            [InlineKeyboardButton("🛠 Services", callback_data="services")],
+            [InlineKeyboardButton("💰 Price", callback_data="price")],
+            [InlineKeyboardButton("🤖 About This Bot", callback_data="about")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
     else:
         text = "❓ HELP\n\nమీకు కావాల్సిన విషయం message గా పంపండి.\n\nఉదాహరణలు:\n• Contact\n• Price\n• CRI pump\n• 1 HP pump\n• Services\n\n/start పంపితే main menu వస్తుంది."
     await query.edit_message_text(text)
