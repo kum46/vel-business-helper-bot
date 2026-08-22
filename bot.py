@@ -163,12 +163,29 @@ def _init_turso_db():
                 details TEXT
             )
         """)
+        # --- NEW: Business Settings table (separate, no impact on products) ---
+        _execute_turso("""
+            CREATE TABLE IF NOT EXISTS business_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                business_name TEXT,
+                address TEXT,
+                phone TEXT,
+                whatsapp TEXT,
+                email TEXT,
+                description TEXT
+            )
+        """)
+        # Ensure single row id=1 exists
+        _execute_turso("""
+            INSERT OR IGNORE INTO business_settings (id, business_name, address, phone, whatsapp, email, description)
+            VALUES (1, '', '', '', '', '', '')
+        """)
         _turso_initialized = True
-        logger.info("Turso products table ensured")
+        logger.info("Turso products and business_settings tables ensured")
         _migrate_json_if_needed()
         return True
     except Exception:
-        logger.exception("Failed to init Turso table")
+        logger.exception("Failed to init Turso tables")
         return False
 
 def _migrate_json_if_needed():
@@ -254,6 +271,63 @@ def _delete_product(product_id):
     result = _execute_turso("DELETE FROM products WHERE id = ?", (product_id,))
     return result is not None
 
+# --- NEW: Business Settings Functions ---
+def _get_business_settings():
+    result = _execute_turso("SELECT business_name, address, phone, whatsapp, email, description FROM business_settings WHERE id = 1")
+    if result is None or not result.rows:
+        return {"business_name": "", "address": "", "phone": "", "whatsapp": "", "email": "", "description": ""}
+    try:
+        r = result.rows[0]
+        return {
+            "business_name": r[0] or "",
+            "address": r[1] or "",
+            "phone": r[2] or "",
+            "whatsapp": r[3] or "",
+            "email": r[4] or "",
+            "description": r[5] or ""
+        }
+    except Exception:
+        logger.exception("Failed to parse business settings")
+        return {"business_name": "", "address": "", "phone": "", "whatsapp": "", "email": "", "description": ""}
+
+def _update_business_field(field, value):
+    allowed = {"business_name", "address", "phone", "whatsapp", "email", "description"}
+    if field not in allowed:
+        return False
+    # Use parameterized column via string formatting (safe because allowed set)
+    sql = f"UPDATE business_settings SET {field} = ? WHERE id = 1"
+    result = _execute_turso(sql, (value,))
+    return result is not None
+
+def _format_business_settings_admin(settings):
+    lines = ["⚙️ BUSINESS SETTINGS\n"]
+    lines.append(f"🏢 Business Name: {settings.get('business_name') or 'Not set'}")
+    lines.append(f"📍 Address: {settings.get('address') or 'Not set'}")
+    lines.append(f"📞 Phone: {settings.get('phone') or 'Not set'}")
+    lines.append(f"📱 WhatsApp: {settings.get('whatsapp') or 'Not set'}")
+    lines.append(f"📧 Email: {settings.get('email') or 'Not set'}")
+    lines.append(f"📝 Description: {settings.get('description') or 'Not set'}")
+    return "\n".join(lines)
+
+def _format_business_settings_customer(settings):
+    # Show only saved data, no hard-coded fallback
+    if not any([settings.get("business_name"), settings.get("address"), settings.get("phone"), settings.get("whatsapp"), settings.get("email"), settings.get("description")]):
+        return "🏢 BUSINESS INFORMATION\n\nBusiness information not yet configured.\nPlease contact admin."
+    lines = ["🏢 BUSINESS INFORMATION\n"]
+    if settings.get("business_name"):
+        lines.append(f"🏢 {settings.get('business_name')}")
+    if settings.get("address"):
+        lines.append(f"📍 {settings.get('address')}")
+    if settings.get("phone"):
+        lines.append(f"📞 Phone: {settings.get('phone')}")
+    if settings.get("whatsapp"):
+        lines.append(f"📱 WhatsApp: {settings.get('whatsapp')}")
+    if settings.get("email"):
+        lines.append(f"📧 Email: {settings.get('email')}")
+    if settings.get("description"):
+        lines.append(f"\n📝 {settings.get('description')}")
+    return "\n".join(lines)
+
 def _format_price_display(price_str):
     try:
         clean = price_str.replace(",", "").strip()
@@ -265,7 +339,6 @@ def _format_price_display(price_str):
     except Exception:
         return f"₹{price_str}"
 
-# --- FIX 1: View Products -> Actual Database ID (not enumerate index) ---
 def _format_products_list(products):
     if not products:
         return "📦 PRODUCTS\n\nNo products added yet."
@@ -276,7 +349,6 @@ def _format_products_list(products):
         price = p.get("price", "")
         details = p.get("details", "")
         price_display = _format_price_display(str(price)) if price else ""
-        # As per screenshot: ID: 2, Product B, ₹500, Details B
         lines.append(f"ID: {actual_id}")
         lines.append(f"📦 {name}")
         if price_display:
@@ -296,23 +368,59 @@ def _get_product_selection_keyboard(products, prefix, include_back=True):
         keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")])
     return InlineKeyboardMarkup(keyboard)
 
-# --- Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def _get_business_settings_edit_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🏢 Edit Business Name", callback_data="admin_biz_edit_name")],
+        [InlineKeyboardButton("📍 Edit Address", callback_data="admin_biz_edit_address")],
+        [InlineKeyboardButton("📞 Edit Phone", callback_data="admin_biz_edit_phone")],
+        [InlineKeyboardButton("📱 Edit WhatsApp", callback_data="admin_biz_edit_whatsapp")],
+        [InlineKeyboardButton("📧 Edit Email", callback_data="admin_biz_edit_email")],
+        [InlineKeyboardButton("📝 Edit Description", callback_data="admin_biz_edit_desc")],
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def _get_customer_main_keyboard():
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
         [InlineKeyboardButton("💰 Price", callback_data="price")],
+        [InlineKeyboardButton("🏢 Business Info", callback_data="business_info")],
         [InlineKeyboardButton("🤖 About This Bot", callback_data="about")],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
-    await update.message.reply_text("👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇", reply_markup=InlineKeyboardMarkup(keyboard))
+    return InlineKeyboardMarkup(keyboard)
+
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇",
+        reply_markup=_get_customer_main_keyboard()
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "services":
         text = "🛠 SERVICES\n\n• Business information\n• Product information\n• Pump information\n• Customer enquiry support\n• Contact details\n\nమరిన్ని services త్వరలో add చేస్తాము."
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
     elif query.data == "price":
         text = "💰 PRICE INFORMATION\n\nProduct/model మీద price మారుతుంది.\n\nమీకు కావాల్సిన product లేదా model పేరు పంపండి.\n\nఉదాహరణ:\nCRI pump\n1 HP pump\n2 HP motor\nOpenwell pump"
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    elif query.data == "business_info":
+        settings = _get_business_settings()
+        if settings is None:
+            text = "❌ Database connection failed. Please try again later."
+            keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        text = _format_business_settings_customer(settings)
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
     elif query.data == "about":
         text = (
             "🤖 VEL BUSINESS HELPER\n\n"
@@ -335,17 +443,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif query.data == "back_to_start":
         text = "👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇"
-        keyboard = [
-            [InlineKeyboardButton("🛠 Services", callback_data="services")],
-            [InlineKeyboardButton("💰 Price", callback_data="price")],
-            [InlineKeyboardButton("🤖 About This Bot", callback_data="about")],
-            [InlineKeyboardButton("❓ Help", callback_data="help")],
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(text, reply_markup=_get_customer_main_keyboard())
         return
     else:
         text = "❓ HELP\n\nమీకు కావాల్సిన విషయం message గా పంపండి.\n\nఉదాహరణలు:\n• Contact\n• Price\n• CRI pump\n• 1 HP pump\n• Services\n\n/start పంపితే main menu వస్తుంది."
-    await query.edit_message_text(text)
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -353,6 +457,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
+        # Add Product
         if flow == "add_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -385,6 +490,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product saved successfully!\n\n📦 Name: {temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {temp.get('details')}")
                 return
+        # Edit Product
         elif flow == "edit_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -422,6 +528,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(edit_temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product updated successfully!\n\nID: {edit_id}\n📦 Name: {edit_temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {edit_temp.get('details')}")
                 return
+        # Change Price
         elif flow == "change_price":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -445,6 +552,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = product.get("name") if product else "Product"
                 await update.message.reply_text(f"✅ Price updated successfully!\n\nID: {edit_id}\n📦 {name}\n💰 New Price: {price_display}")
                 return
+        # Edit Details
         elif flow == "edit_details":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -464,18 +572,48 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = product.get("name") if product else "Product"
                 await update.message.reply_text(f"✅ Details updated successfully!\n\nID: {edit_id}\n📦 {name}\n📝 New Details: {msg_text}")
                 return
+        # Business Settings - NEW
+        elif flow == "business_settings":
+            step = context.user_data.get("admin_step")
+            msg_text = update.message.text.strip()
+            field_map = {
+                "awaiting_biz_name": "business_name",
+                "awaiting_biz_address": "address",
+                "awaiting_biz_phone": "phone",
+                "awaiting_biz_whatsapp": "whatsapp",
+                "awaiting_biz_email": "email",
+                "awaiting_biz_desc": "description"
+            }
+            field = field_map.get(step)
+            if field:
+                if not msg_text and field in ["business_name"]:
+                    await update.message.reply_text("Business Name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    return
+                success = _update_business_field(field, msg_text)
+                if not success:
+                    await update.message.reply_text("❌ Database connection failed. Please try again.")
+                    return
+                context.user_data.pop("admin_flow", None)
+                context.user_data.pop("admin_step", None)
+                context.user_data.pop("biz_field", None)
+                await update.message.reply_text(f"✅ Business settings updated successfully!\n\nUpdated {field.replace('_',' ').title()}: {msg_text}")
+                return
 
     text = update.message.text.strip().lower()
     if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
-        await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.")
-    elif "contact" in text:
-        await update.message.reply_text("📞 CONTACT\n\nLaxman Rela\nDealer - C.R.I. PUMPS\nVAARAAHI ENGINEERING COMPANY\n\n📍 D.No. 7-30-24/2, Main Road,\nRajamahendravaram, A.P. - 533101\n\n📱 94908 35009")
+        await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.", reply_markup=_get_customer_main_keyboard())
+    elif "contact" in text or "business" in text:
+        settings = _get_business_settings()
+        if settings and any(settings.values()):
+            await update.message.reply_text(_format_business_settings_customer(settings), reply_markup=_get_customer_main_keyboard())
+        else:
+            await update.message.reply_text("🏢 BUSINESS INFORMATION\n\nBusiness information not yet configured.\nPlease contact admin.", reply_markup=_get_customer_main_keyboard())
     elif "price" in text or "ధర" in text:
-        await update.message.reply_text("💰 Price తెలుసుకోవడానికి product/model పేరు పంపండి.\n\nఉదాహరణ:\nCRI 1 HP\nCRI 2 HP\nOpenwell pump")
+        await update.message.reply_text("💰 Price తెలుసుకోవడానికి product/model పేరు పంపండి.\n\nఉదాహరణ:\nCRI 1 HP\nCRI 2 HP\nOpenwell pump", reply_markup=_get_customer_main_keyboard())
     elif "pump" in text or "పంప్" in text:
-        await update.message.reply_text("🔧 PUMP INFORMATION\n\nమీకు కావాల్సిన pump details కోసం model పేరు పంపండి.\n\nఉదాహరణ:\n1 HP pump\n2 HP pump\nOpenwell pump\nSubmersible pump")
+        await update.message.reply_text("🔧 PUMP INFORMATION\n\nమీకు కావాల్సిన pump details కోసం model పేరు పంపండి.\n\nఉదాహరణ:\n1 HP pump\n2 HP pump\nOpenwell pump\nSubmersible pump", reply_markup=_get_customer_main_keyboard())
     else:
-        await update.message.reply_text("🙂 మీ message అందింది.\n\nదయచేసి /start పంపి option ఎంచుకోండి.\n\nలేదా మీకు కావాల్సిన product పేరు పంపండి.")
+        await update.message.reply_text("🙂 మీ message అందింది.\n\nదయచేసి /start పంపి option ఎంచుకోండి.\n\nలేదా మీకు కావాల్సిన product పేరు పంపండి.", reply_markup=_get_customer_main_keyboard())
 
 async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Telegram handler error: %s", context.error, exc_info=context.error)
@@ -488,6 +626,7 @@ def _get_admin_keyboard():
         [InlineKeyboardButton("💰 Change Price", callback_data="admin_change_price")],
         [InlineKeyboardButton("📝 Edit Details", callback_data="admin_edit_details")],
         [InlineKeyboardButton("🗑️ Delete Product", callback_data="admin_delete_product")],
+        [InlineKeyboardButton("⚙️ Business Settings", callback_data="admin_business_settings")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -516,7 +655,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("➕ ADD PRODUCT\n\nProduct name పంపండి:")
         return
 
-    # --- FIX 2: View Products with Back to Admin Panel button ---
     if data == "admin_view_products":
         products = _load_products()
         text = _format_products_list(products)
@@ -642,11 +780,53 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(f"🗑️ Product deleted successfully!\n\nDeleted: {name} (ID: {product_id})")
         return
 
+    # --- NEW: Business Settings ---
+    if data == "admin_business_settings":
+        settings = _get_business_settings()
+        if settings is None:
+            await query.edit_message_text("❌ Database connection failed. Please try again.")
+            return
+        text = _format_business_settings_admin(settings)
+        await query.edit_message_text(text, reply_markup=_get_business_settings_edit_keyboard())
+        return
+
+    if data == "admin_biz_edit_name":
+        context.user_data["admin_flow"] = "business_settings"
+        context.user_data["admin_step"] = "awaiting_biz_name"
+        await query.edit_message_text("🏢 EDIT BUSINESS NAME\n\nCurrent Business Name will be replaced.\n\n➡️ కొత్త Business Name పంపండి:")
+        return
+    if data == "admin_biz_edit_address":
+        context.user_data["admin_flow"] = "business_settings"
+        context.user_data["admin_step"] = "awaiting_biz_address"
+        await query.edit_message_text("📍 EDIT ADDRESS\n\n➡️ కొత్త Address పంపండి:")
+        return
+    if data == "admin_biz_edit_phone":
+        context.user_data["admin_flow"] = "business_settings"
+        context.user_data["admin_step"] = "awaiting_biz_phone"
+        await query.edit_message_text("📞 EDIT PHONE\n\n➡️ కొత్త Phone Number పంపండి:")
+        return
+    if data == "admin_biz_edit_whatsapp":
+        context.user_data["admin_flow"] = "business_settings"
+        context.user_data["admin_step"] = "awaiting_biz_whatsapp"
+        await query.edit_message_text("📱 EDIT WHATSAPP\n\n➡️ కొత్త WhatsApp Number పంపండి:")
+        return
+    if data == "admin_biz_edit_email":
+        context.user_data["admin_flow"] = "business_settings"
+        context.user_data["admin_step"] = "awaiting_biz_email"
+        await query.edit_message_text("📧 EDIT EMAIL\n\n➡️ కొత్త Email పంపండి:")
+        return
+    if data == "admin_biz_edit_desc":
+        context.user_data["admin_flow"] = "business_settings"
+        context.user_data["admin_step"] = "awaiting_biz_desc"
+        await query.edit_message_text("📝 EDIT DESCRIPTION\n\n➡️ కొత్త Business Description పంపండి:")
+        return
+
     if data == "admin_back":
         context.user_data.pop("admin_flow", None)
         context.user_data.pop("admin_step", None)
         context.user_data.pop("edit_product_id", None)
         context.user_data.pop("edit_temp", None)
+        context.user_data.pop("biz_field", None)
         await query.edit_message_text("🔐 ADMIN PANEL\n\nWelcome Admin! కింద ఉన్న option ఎంచుకోండి 👇", reply_markup=_get_admin_keyboard())
         return
 
