@@ -34,7 +34,7 @@ def home():
 def health():
     return "OK"
 
-# --- TURSO STORAGE via HTTP API (uses only httpx) ---
+# --- TURSO STORAGE via HTTP API ---
 class _TursoResult:
     def __init__(self, rows):
         self.rows = rows
@@ -265,20 +265,24 @@ def _format_price_display(price_str):
     except Exception:
         return f"₹{price_str}"
 
+# --- FIX 1: View Products -> Actual Database ID (not enumerate index) ---
 def _format_products_list(products):
     if not products:
         return "📦 PRODUCTS\n\nNo products added yet."
     lines = ["📦 PRODUCTS\n"]
-    for idx, p in enumerate(products, 1):
+    for p in products:
+        actual_id = p.get("id")
         name = p.get("name", "Unknown")
         price = p.get("price", "")
         details = p.get("details", "")
         price_display = _format_price_display(str(price)) if price else ""
-        lines.append(f"{idx}. {name}")
+        # As per screenshot: ID: 2, Product B, ₹500, Details B
+        lines.append(f"ID: {actual_id}")
+        lines.append(f"📦 {name}")
         if price_display:
-            lines.append(f"   💰 {price_display}")
+            lines.append(f"💰 {price_display}")
         if details:
-            lines.append(f"   📝 {details}")
+            lines.append(f"📝 {details}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -321,7 +325,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
-        # Add Product
         if flow == "add_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -354,7 +357,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product saved successfully!\n\n📦 Name: {temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {temp.get('details')}")
                 return
-        # Edit Product (full edit)
         elif flow == "edit_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -392,7 +394,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(edit_temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product updated successfully!\n\nID: {edit_id}\n📦 Name: {edit_temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {edit_temp.get('details')}")
                 return
-        # Change Price Only
         elif flow == "change_price":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -416,7 +417,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = product.get("name") if product else "Product"
                 await update.message.reply_text(f"✅ Price updated successfully!\n\nID: {edit_id}\n📦 {name}\n💰 New Price: {price_display}")
                 return
-        # Edit Details Only
         elif flow == "edit_details":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -488,10 +488,12 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("➕ ADD PRODUCT\n\nProduct name పంపండి:")
         return
 
+    # --- FIX 2: View Products with Back to Admin Panel button ---
     if data == "admin_view_products":
         products = _load_products()
         text = _format_products_list(products)
-        await query.edit_message_text(text)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")]])
+        await query.edit_message_text(text, reply_markup=keyboard)
         return
 
     if data == "admin_edit_product":
@@ -663,19 +665,16 @@ except Exception:
 WEBHOOK_PATH = "/telegram-webhook"
 
 def _get_webhook_secret():
-    # Support both names
     return os.getenv("TELEGRAM_WEBHOOK_SECRET_TOKEN") or os.getenv("WEBHOOK_SECRET_TOKEN") or os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
-    # --- Webhook Secret Security ---
     secret = _get_webhook_secret()
     if secret:
         header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
         if header_secret != secret:
             logger.warning("Webhook secret mismatch - rejecting request")
             return "Forbidden", 403
-
     try:
         json_data = request.get_json(force=True)
         if not json_data:
@@ -709,10 +708,8 @@ def _register_webhook_if_needed():
             current = await telegram_app.bot.get_webhook_info()
             if current.url == webhook_url:
                 logger.info("Webhook already correctly configured: %s", webhook_url)
-                # Even if URL same, ensure secret_token is set if needed
                 secret = _get_webhook_secret()
                 if secret:
-                    # Check if secret needs update - set again with secret
                     await telegram_app.bot.set_webhook(url=webhook_url, secret_token=secret, drop_pending_updates=False)
                     logger.info("Webhook secret_token ensured")
                 return
