@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 import logging
+from datetime import datetime
 
 from flask import Flask, request
 from telegram import Update
@@ -163,7 +164,6 @@ def _init_turso_db():
                 details TEXT
             )
         """)
-        # --- NEW: Business Settings table (separate, no impact on products) ---
         _execute_turso("""
             CREATE TABLE IF NOT EXISTS business_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -175,13 +175,26 @@ def _init_turso_db():
                 description TEXT
             )
         """)
-        # Ensure single row id=1 exists
         _execute_turso("""
             INSERT OR IGNORE INTO business_settings (id, business_name, address, phone, whatsapp, email, description)
             VALUES (1, '', '', '', '', '', '')
         """)
+        # --- NEW: Enquiries table ---
+        _execute_turso("""
+            CREATE TABLE IF NOT EXISTS enquiries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER,
+                product_name TEXT NOT NULL,
+                product_price TEXT,
+                customer_name TEXT,
+                telegram_user_id INTEGER,
+                username TEXT,
+                status TEXT DEFAULT 'new',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         _turso_initialized = True
-        logger.info("Turso products and business_settings tables ensured")
+        logger.info("Turso products, business_settings and enquiries tables ensured")
         _migrate_json_if_needed()
         return True
     except Exception:
@@ -242,6 +255,18 @@ def _get_product_by_id(product_id):
     except Exception:
         return None
 
+def _search_products(query):
+    result = _execute_turso("SELECT id, name, price, details FROM products WHERE name LIKE ? OR details LIKE ? ORDER BY id ASC", (f"%{query}%", f"%{query}%"))
+    if result is None:
+        return []
+    products = []
+    try:
+        for r in result.rows:
+            products.append({"id": r[0], "name": r[1], "price": r[2], "details": r[3] if len(r) > 3 else ""})
+    except Exception:
+        pass
+    return products
+
 def _add_product_to_turso(name, price, details):
     result = _execute_turso("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
     if result is None:
@@ -271,7 +296,7 @@ def _delete_product(product_id):
     result = _execute_turso("DELETE FROM products WHERE id = ?", (product_id,))
     return result is not None
 
-# --- NEW: Business Settings Functions ---
+# Business Settings
 def _get_business_settings():
     result = _execute_turso("SELECT business_name, address, phone, whatsapp, email, description FROM business_settings WHERE id = 1")
     if result is None or not result.rows:
@@ -294,9 +319,75 @@ def _update_business_field(field, value):
     allowed = {"business_name", "address", "phone", "whatsapp", "email", "description"}
     if field not in allowed:
         return False
-    # Use parameterized column via string formatting (safe because allowed set)
     sql = f"UPDATE business_settings SET {field} = ? WHERE id = 1"
     result = _execute_turso(sql, (value,))
+    return result is not None
+
+# Enquiries
+def _create_enquiry(product_id, product_name, product_price, customer_name, telegram_user_id, username):
+    result = _execute_turso(
+        "INSERT INTO enquiries (product_id, product_name, product_price, customer_name, telegram_user_id, username, status) VALUES (?, ?, ?, ?, ?, ?, 'new')",
+        (product_id, product_name, product_price, customer_name, telegram_user_id, username or "")
+    )
+    if result is None:
+        return None
+    try:
+        res2 = _execute_turso("SELECT last_insert_rowid()")
+        if res2 and res2.rows:
+            return res2.rows[0][0]
+        return 1
+    except Exception:
+        logger.exception("Failed to get enquiry id")
+        return 1
+
+def _load_enquiries():
+    result = _execute_turso("SELECT id, product_id, product_name, product_price, customer_name, telegram_user_id, username, status, created_at FROM enquiries ORDER BY id DESC")
+    if result is None:
+        return []
+    enqs = []
+    try:
+        for r in result.rows:
+            enqs.append({
+                "id": r[0],
+                "product_id": r[1],
+                "product_name": r[2],
+                "product_price": r[3],
+                "customer_name": r[4],
+                "telegram_user_id": r[5],
+                "username": r[6],
+                "status": r[7],
+                "created_at": r[8]
+            })
+    except Exception:
+        logger.exception("Failed to parse enquiries")
+    return enqs
+
+def _get_enquiry_by_id(enq_id):
+    result = _execute_turso("SELECT id, product_id, product_name, product_price, customer_name, telegram_user_id, username, status, created_at FROM enquiries WHERE id = ?", (enq_id,))
+    if result is None or not result.rows:
+        return None
+    try:
+        r = result.rows[0]
+        return {
+            "id": r[0],
+            "product_id": r[1],
+            "product_name": r[2],
+            "product_price": r[3],
+            "customer_name": r[4],
+            "telegram_user_id": r[5],
+            "username": r[6],
+            "status": r[7],
+            "created_at": r[8]
+        }
+    except Exception:
+        return None
+
+def _update_enquiry_status(enq_id, status):
+    result = _execute_turso("UPDATE enquiries SET status = ? WHERE id = ?", (status, enq_id))
+    return result is not None
+
+def _delete_enquiry(enq_id):
+    result = _execute_turso("DELETE FROM enquiries WHERE id = ?", (enq_id,))
     return result is not None
 
 def _format_business_settings_admin(settings):
@@ -310,7 +401,6 @@ def _format_business_settings_admin(settings):
     return "\n".join(lines)
 
 def _format_business_settings_customer(settings):
-    # Show only saved data, no hard-coded fallback
     if not any([settings.get("business_name"), settings.get("address"), settings.get("phone"), settings.get("whatsapp"), settings.get("email"), settings.get("description")]):
         return "🏢 BUSINESS INFORMATION\n\nBusiness information not yet configured.\nPlease contact admin."
     lines = ["🏢 BUSINESS INFORMATION\n"]
@@ -358,6 +448,17 @@ def _format_products_list(products):
         lines.append("")
     return "\n".join(lines).strip()
 
+def _format_customer_product(product):
+    pid = product.get("id")
+    name = product.get("name", "Unknown")
+    price = product.get("price", "")
+    details = product.get("details", "")
+    price_display = _format_price_display(str(price)) if price else "Not available"
+    lines = [f"ID: {pid}", f"📦 Product Name: {name}", f"💰 Price: {price_display}"]
+    if details:
+        lines.append(f"📝 Details: {details}")
+    return "\n".join(lines)
+
 def _get_product_selection_keyboard(products, prefix, include_back=True):
     keyboard = []
     for p in products:
@@ -366,6 +467,15 @@ def _get_product_selection_keyboard(products, prefix, include_back=True):
         keyboard.append([InlineKeyboardButton(f"{pid}. {name}", callback_data=f"{prefix}{pid}")])
     if include_back:
         keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")])
+    return InlineKeyboardMarkup(keyboard)
+
+def _get_customer_product_list_keyboard(products):
+    keyboard = []
+    for p in products:
+        pid = p.get("id")
+        name = p.get("name", "Unknown")[:25]
+        keyboard.append([InlineKeyboardButton(f"📦 {name} - 📩 Enquire", callback_data=f"cust_enq_{pid}")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")])
     return InlineKeyboardMarkup(keyboard)
 
 def _get_business_settings_edit_keyboard():
@@ -399,16 +509,136 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user = query.from_user
     await query.answer()
+
+    # Customer Product Enquiry - Confirmation Screen
+    if query.data.startswith("cust_enq_"):
+        # cust_enq_{id} -> confirmation
+        # cust_enq_send_{id} -> send
+        # cust_enq_cancel_{id} -> cancel
+        # cust_enq_detail_{id} -> detail (not used, but handle)
+        data = query.data
+
+        # Send Enquiry
+        if data.startswith("cust_enq_send_"):
+            try:
+                product_id = int(data.replace("cust_enq_send_", ""))
+            except Exception:
+                await query.edit_message_text("❌ Invalid product ID.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]))
+                return
+            product = _get_product_by_id(product_id)
+            if not product:
+                await query.edit_message_text("❌ Product not found. It may have been deleted.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]))
+                return
+
+            customer_name = (user.full_name if user else "Customer") or "Customer"
+            telegram_user_id = user.id if user else 0
+            username = user.username if user and user.username else "Not available"
+
+            # Create enquiry in Turso
+            enq_id = _create_enquiry(product_id, product.get("name"), str(product.get("price")), customer_name, telegram_user_id, username)
+            if enq_id is None:
+                logger.error("Failed to create enquiry for product %s", product_id)
+                await query.edit_message_text(
+                    "❌ Enquiry could not be submitted.\nPlease try again later.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]])
+                )
+                return
+
+            # Notify Admin
+            try:
+                price_display = _format_price_display(str(product.get("price") or ""))
+                admin_text = (
+                    f"🔔 NEW CUSTOMER ENQUIRY\n\n"
+                    f"📦 Product: {product.get('name')}\n"
+                    f"🆔 Product ID: {product_id}\n"
+                    f"💰 Price: {price_display}\n\n"
+                    f"👤 Customer: {customer_name}\n"
+                    f"🆔 Telegram ID: {telegram_user_id}\n"
+                    f"🔗 Username: {username}\n\n"
+                    f"📅 Enquiry received."
+                )
+                await telegram_app.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_text)
+            except Exception:
+                logger.exception("Failed to send admin notification for enquiry %s", enq_id)
+
+            # Customer confirmation
+            customer_confirm = (
+                f"✅ Enquiry Sent Successfully!\n\n"
+                f"📦 Product: {product.get('name')}\n\n"
+                f"The business admin will contact you soon."
+            )
+            keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+            await query.edit_message_text(customer_confirm, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        # Cancel Enquiry
+        if data.startswith("cust_enq_cancel_"):
+            try:
+                product_id = int(data.replace("cust_enq_cancel_", ""))
+            except Exception:
+                await query.edit_message_text("Enquiry cancelled.", reply_markup=_get_customer_main_keyboard())
+                return
+            product = _get_product_by_id(product_id)
+            if not product:
+                await query.edit_message_text("Enquiry cancelled.", reply_markup=_get_customer_main_keyboard())
+                return
+            # Return to previous product screen
+            text = _format_customer_product(product)
+            keyboard = [
+                [InlineKeyboardButton("📩 Enquire Now", callback_data=f"cust_enq_{product_id}")],
+                [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        # Initial Enquiry Request -> Show Confirmation
+        if data.startswith("cust_enq_"):
+            # This is cust_enq_{id}
+            try:
+                # Remove prefix, but avoid parsing send/cancel which already handled
+                pid_str = data.replace("cust_enq_", "")
+                # If pid_str contains non-digit due to send/cancel, already handled
+                product_id = int(pid_str)
+            except Exception:
+                await query.edit_message_text("❌ Invalid product.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]))
+                return
+            product = _get_product_by_id(product_id)
+            if not product:
+                await query.edit_message_text("❌ Product not found. It may have been deleted.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]))
+                return
+
+            price_display = _format_price_display(str(product.get("price") or ""))
+            confirm_text = (
+                f"📩 PRODUCT ENQUIRY\n\n"
+                f"📦 Product: {product.get('name')}\n"
+                f"💰 Price: {price_display}\n\n"
+                f"Would you like to send an enquiry to the business?"
+            )
+            keyboard = [
+                [InlineKeyboardButton("✅ Send Enquiry", callback_data=f"cust_enq_send_{product_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"cust_enq_cancel_{product_id}")]
+            ]
+            await query.edit_message_text(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
     if query.data == "services":
         text = "🛠 SERVICES\n\n• Business information\n• Product information\n• Pump information\n• Customer enquiry support\n• Contact details\n\nమరిన్ని services త్వరలో add చేస్తాము."
         keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
     elif query.data == "price":
-        text = "💰 PRICE INFORMATION\n\nProduct/model మీద price మారుతుంది.\n\nమీకు కావాల్సిన product లేదా model పేరు పంపండి.\n\nఉదాహరణ:\nCRI pump\n1 HP pump\n2 HP motor\nOpenwell pump"
-        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        products = _load_products()
+        if not products:
+            text = "💰 PRICE INFORMATION\n\nNo products available yet.\nPlease check back later."
+            keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        # Show product list with Enquire Now buttons
+        text = "💰 PRODUCTS - Tap Enquire to contact business\n\nSelect a product to enquire:"
+        keyboard = _get_customer_product_list_keyboard(products)
+        await query.edit_message_text(text, reply_markup=keyboard)
         return
     elif query.data == "business_info":
         settings = _get_business_settings()
@@ -457,7 +687,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
-        # Add Product
         if flow == "add_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -490,7 +719,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product saved successfully!\n\n📦 Name: {temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {temp.get('details')}")
                 return
-        # Edit Product
         elif flow == "edit_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -528,7 +756,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(edit_temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product updated successfully!\n\nID: {edit_id}\n📦 Name: {edit_temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {edit_temp.get('details')}")
                 return
-        # Change Price
         elif flow == "change_price":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -552,7 +779,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = product.get("name") if product else "Product"
                 await update.message.reply_text(f"✅ Price updated successfully!\n\nID: {edit_id}\n📦 {name}\n💰 New Price: {price_display}")
                 return
-        # Edit Details
         elif flow == "edit_details":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -572,7 +798,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = product.get("name") if product else "Product"
                 await update.message.reply_text(f"✅ Details updated successfully!\n\nID: {edit_id}\n📦 {name}\n📝 New Details: {msg_text}")
                 return
-        # Business Settings - NEW
         elif flow == "business_settings":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -599,19 +824,57 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"✅ Business settings updated successfully!\n\nUpdated {field.replace('_',' ').title()}: {msg_text}")
                 return
 
-    text = update.message.text.strip().lower()
-    if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
+    # Customer search - show products with Enquire button
+    text = update.message.text.strip()
+    text_lower = text.lower()
+
+    if text_lower in ["hi", "hello", "hey", "హాయ్", "హలో"]:
         await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.", reply_markup=_get_customer_main_keyboard())
-    elif "contact" in text or "business" in text:
+        return
+
+    # Try product search first for customer
+    if len(text) >= 2:
+        matched = _search_products(text)
+        if matched:
+            # Show up to 5 matching products with Enquire buttons
+            for prod in matched[:3]:
+                prod_text = _format_customer_product(prod)
+                keyboard = [
+                    [InlineKeyboardButton("📩 Enquire Now", callback_data=f"cust_enq_{prod.get('id')}")],
+                    [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]
+                ]
+                await update.message.reply_text(prod_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+    if "contact" in text_lower or "business" in text_lower:
         settings = _get_business_settings()
         if settings and any(settings.values()):
             await update.message.reply_text(_format_business_settings_customer(settings), reply_markup=_get_customer_main_keyboard())
         else:
             await update.message.reply_text("🏢 BUSINESS INFORMATION\n\nBusiness information not yet configured.\nPlease contact admin.", reply_markup=_get_customer_main_keyboard())
-    elif "price" in text or "ధర" in text:
-        await update.message.reply_text("💰 Price తెలుసుకోవడానికి product/model పేరు పంపండి.\n\nఉదాహరణ:\nCRI 1 HP\nCRI 2 HP\nOpenwell pump", reply_markup=_get_customer_main_keyboard())
-    elif "pump" in text or "పంప్" in text:
+        return
+    elif "price" in text_lower or "ధర" in text_lower:
+        products = _load_products()
+        if products:
+            text_msg = "💰 PRODUCTS - Tap Enquire to contact business\n\nSelect a product to enquire:"
+            keyboard = _get_customer_product_list_keyboard(products)
+            await update.message.reply_text(text_msg, reply_markup=keyboard)
+        else:
+            await update.message.reply_text("💰 Price తెలుసుకోవడానికి product/model పేరు పంపండి.\n\nఉదాహరణ:\nCRI 1 HP\nCRI 2 HP\nOpenwell pump", reply_markup=_get_customer_main_keyboard())
+        return
+    elif "pump" in text_lower or "పంప్" in text_lower:
+        matched = _search_products(text)
+        if matched:
+            for prod in matched[:3]:
+                prod_text = _format_customer_product(prod)
+                keyboard = [
+                    [InlineKeyboardButton("📩 Enquire Now", callback_data=f"cust_enq_{prod.get('id')}")],
+                    [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]
+                ]
+                await update.message.reply_text(prod_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
         await update.message.reply_text("🔧 PUMP INFORMATION\n\nమీకు కావాల్సిన pump details కోసం model పేరు పంపండి.\n\nఉదాహరణ:\n1 HP pump\n2 HP pump\nOpenwell pump\nSubmersible pump", reply_markup=_get_customer_main_keyboard())
+        return
     else:
         await update.message.reply_text("🙂 మీ message అందింది.\n\nదయచేసి /start పంపి option ఎంచుకోండి.\n\nలేదా మీకు కావాల్సిన product పేరు పంపండి.", reply_markup=_get_customer_main_keyboard())
 
@@ -627,6 +890,7 @@ def _get_admin_keyboard():
         [InlineKeyboardButton("📝 Edit Details", callback_data="admin_edit_details")],
         [InlineKeyboardButton("🗑️ Delete Product", callback_data="admin_delete_product")],
         [InlineKeyboardButton("⚙️ Business Settings", callback_data="admin_business_settings")],
+        [InlineKeyboardButton("📩 Customer Enquiries", callback_data="admin_enquiries")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -780,7 +1044,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(f"🗑️ Product deleted successfully!\n\nDeleted: {name} (ID: {product_id})")
         return
 
-    # --- NEW: Business Settings ---
     if data == "admin_business_settings":
         settings = _get_business_settings()
         if settings is None:
@@ -820,6 +1083,124 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["admin_step"] = "awaiting_biz_desc"
         await query.edit_message_text("📝 EDIT DESCRIPTION\n\n➡️ కొత్త Business Description పంపండి:")
         return
+
+    # --- NEW: Customer Enquiries ---
+    if data == "admin_enquiries":
+        enquiries = _load_enquiries()
+        if not enquiries:
+            text = "📩 CUSTOMER ENQUIRIES\n\nNo customer enquiries yet."
+            keyboard = [[InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        # Show list with buttons
+        keyboard = []
+        lines = ["📩 CUSTOMER ENQUIRIES\n"]
+        for enq in enquiries[:15]:  # Limit to 15 to avoid too many buttons
+            enq_id = enq.get("id")
+            prod = enq.get("product_name", "Unknown")[:20]
+            cust = enq.get("customer_name", "Customer")[:15]
+            status_emoji = "🆕" if enq.get("status") == "new" else "✅"
+            lines.append(f"{status_emoji} ID:{enq_id} 📦{prod} 👤{cust} 📌{enq.get('status')}")
+            keyboard.append([InlineKeyboardButton(f"{status_emoji} ID:{enq_id} {prod} - {cust}", callback_data=f"admin_enq_view_{enq_id}")])
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")])
+        text = "\n".join(lines)
+        # Telegram message limit, truncate if needed
+        if len(text) > 3800:
+            text = text[:3800] + "\n...more"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data.startswith("admin_enq_view_"):
+        try:
+            enq_id = int(data.replace("admin_enq_view_", ""))
+        except Exception:
+            await query.edit_message_text("❌ Invalid enquiry ID.")
+            return
+        enq = _get_enquiry_by_id(enq_id)
+        if not enq:
+            await query.edit_message_text("❌ Enquiry not found.")
+            return
+        price_display = _format_price_display(str(enq.get("product_price") or ""))
+        text = (
+            f"📩 ENQUIRY ID: {enq.get('id')}\n\n"
+            f"📦 Product: {enq.get('product_name')}\n"
+            f"🆔 Product ID: {enq.get('product_id')}\n"
+            f"💰 Price: {price_display}\n\n"
+            f"👤 Customer: {enq.get('customer_name')}\n"
+            f"🆔 Telegram ID: {enq.get('telegram_user_id')}\n"
+            f"🔗 Username: {enq.get('username') or 'Not available'}\n"
+            f"📌 Status: {enq.get('status')}\n"
+            f"📅 Date: {enq.get('created_at')}\n"
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ Mark as Contacted", callback_data=f"admin_enq_contact_{enq_id}")],
+            [InlineKeyboardButton("🗑️ Delete Enquiry", callback_data=f"admin_enq_del_{enq_id}")],
+            [InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data.startswith("admin_enq_contact_"):
+        try:
+            enq_id = int(data.replace("admin_enq_contact_", ""))
+        except Exception:
+            await query.edit_message_text("❌ Invalid enquiry ID.")
+            return
+        success = _update_enquiry_status(enq_id, "contacted")
+        if not success:
+            await query.edit_message_text("❌ Failed to update status.")
+            return
+        enq = _get_enquiry_by_id(enq_id)
+        text = f"✅ Enquiry ID {enq_id} marked as contacted.\n\n📦 {enq.get('product_name') if enq else ''} - 👤 {enq.get('customer_name') if enq else ''}"
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")],
+            [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data.startswith("admin_enq_del_"):
+        # Could be admin_enq_del_{id} or admin_enq_del_yes_{id}
+        if data.startswith("admin_enq_del_yes_"):
+            try:
+                enq_id = int(data.replace("admin_enq_del_yes_", ""))
+            except Exception:
+                await query.edit_message_text("❌ Invalid enquiry ID.")
+                return
+            success = _delete_enquiry(enq_id)
+            if not success:
+                await query.edit_message_text("❌ Delete failed.")
+                return
+            await query.edit_message_text(f"🗑️ Enquiry ID {enq_id} deleted successfully.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
+            return
+        elif data.startswith("admin_enq_del_no"):
+            # Cancel delete
+            await query.edit_message_text("Delete cancelled.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
+            return
+        else:
+            # Initial delete request -> confirmation
+            try:
+                enq_id = int(data.replace("admin_enq_del_", ""))
+            except Exception:
+                await query.edit_message_text("❌ Invalid enquiry ID.")
+                return
+            enq = _get_enquiry_by_id(enq_id)
+            if not enq:
+                await query.edit_message_text("❌ Enquiry not found.")
+                return
+            text = (
+                f"⚠️ DELETE ENQUIRY\n\n"
+                f"Are you sure you want to delete this enquiry?\n\n"
+                f"ID: {enq.get('id')}\n"
+                f"📦 {enq.get('product_name')}\n"
+                f"👤 {enq.get('customer_name')}\n"
+            )
+            keyboard = [
+                [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"admin_enq_del_yes_{enq_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"admin_enq_view_{enq_id}")]
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
 
     if data == "admin_back":
         context.user_data.pop("admin_flow", None)
