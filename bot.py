@@ -242,6 +242,18 @@ def _update_product_in_turso(product_id, name, price, details):
     result = _execute_turso("UPDATE products SET name = ?, price = ?, details = ? WHERE id = ?", (name, price, details, product_id))
     return result is not None
 
+def _update_product_price(product_id, price):
+    result = _execute_turso("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
+    return result is not None
+
+def _update_product_details(product_id, details):
+    result = _execute_turso("UPDATE products SET details = ? WHERE id = ?", (details, product_id))
+    return result is not None
+
+def _delete_product(product_id):
+    result = _execute_turso("DELETE FROM products WHERE id = ?", (product_id,))
+    return result is not None
+
 def _format_price_display(price_str):
     try:
         clean = price_str.replace(",", "").strip()
@@ -270,17 +282,17 @@ def _format_products_list(products):
         lines.append("")
     return "\n".join(lines).strip()
 
-def _get_edit_product_selection_keyboard(products):
+def _get_product_selection_keyboard(products, prefix, include_back=True):
     keyboard = []
     for p in products:
         pid = p.get("id")
         name = p.get("name", "Unknown")[:30]
-        # callback_data max 64 bytes, so keep short
-        keyboard.append([InlineKeyboardButton(f"{pid}. {name}", callback_data=f"admin_edit_select_{pid}")])
-    keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")])
+        keyboard.append([InlineKeyboardButton(f"{pid}. {name}", callback_data=f"{prefix}{pid}")])
+    if include_back:
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")])
     return InlineKeyboardMarkup(keyboard)
 
-# --- Existing Handlers ---
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -309,7 +321,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
-        # Add Product Flow
+        # Add Product
         if flow == "add_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -340,14 +352,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("admin_step", None)
                 context.user_data.pop("temp_product", None)
                 price_display = _format_price_display(temp.get("price", ""))
-                await update.message.reply_text(f"✅ Product saved successfully!\n\nProduct:\n{temp.get('name')}\n\nPrice:\n{price_display}")
+                await update.message.reply_text(f"✅ Product saved successfully!\n\n📦 Name: {temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {temp.get('details')}")
                 return
-
-        # Edit Product Flow - NEW
+        # Edit Product (full edit)
         elif flow == "edit_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
-
             if step == "awaiting_edit_name":
                 if not msg_text:
                     await update.message.reply_text("Product name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
@@ -356,7 +366,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["admin_step"] = "awaiting_edit_price"
                 await update.message.reply_text("💰 కొత్త Price పంపండి:")
                 return
-
             elif step == "awaiting_edit_price":
                 if not msg_text:
                     await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
@@ -365,28 +374,67 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["admin_step"] = "awaiting_edit_details"
                 await update.message.reply_text("📝 కొత్త Details పంపండి:")
                 return
-
             elif step == "awaiting_edit_details":
                 edit_id = context.user_data.get("edit_product_id")
                 edit_temp = context.user_data.get("edit_temp", {})
                 edit_temp["details"] = msg_text
-
                 if not edit_id:
                     await update.message.reply_text("❌ Product ID not found. /admin నుంచి మళ్ళీ ప్రయత్నించండి.")
                     return
-
                 success = _update_product_in_turso(edit_id, edit_temp.get("name", ""), edit_temp.get("price", ""), edit_temp.get("details", ""))
                 if not success:
-                    await update.message.reply_text("❌ Database update failed. Turso connection check చేయండి.")
+                    await update.message.reply_text("❌ Database update failed.")
                     return
-
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
                 context.user_data.pop("edit_product_id", None)
                 context.user_data.pop("edit_temp", None)
-
                 price_display = _format_price_display(edit_temp.get("price", ""))
-                await update.message.reply_text(f"✅ Product updated successfully!\n\nID: {edit_id}\nProduct:\n{edit_temp.get('name')}\n\nPrice:\n{price_display}\n\nDetails:\n{edit_temp.get('details')}")
+                await update.message.reply_text(f"✅ Product updated successfully!\n\nID: {edit_id}\n📦 Name: {edit_temp.get('name')}\n💰 Price: {price_display}\n📝 Details: {edit_temp.get('details')}")
+                return
+        # Change Price Only
+        elif flow == "change_price":
+            step = context.user_data.get("admin_step")
+            msg_text = update.message.text.strip()
+            if step == "awaiting_new_price":
+                edit_id = context.user_data.get("edit_product_id")
+                if not edit_id:
+                    await update.message.reply_text("❌ Product ID not found.")
+                    return
+                if not msg_text:
+                    await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    return
+                success = _update_product_price(edit_id, msg_text)
+                if not success:
+                    await update.message.reply_text("❌ Price update failed.")
+                    return
+                product = _get_product_by_id(edit_id)
+                context.user_data.pop("admin_flow", None)
+                context.user_data.pop("admin_step", None)
+                context.user_data.pop("edit_product_id", None)
+                price_display = _format_price_display(msg_text)
+                name = product.get("name") if product else "Product"
+                await update.message.reply_text(f"✅ Price updated successfully!\n\nID: {edit_id}\n📦 {name}\n💰 New Price: {price_display}")
+                return
+        # Edit Details Only
+        elif flow == "edit_details":
+            step = context.user_data.get("admin_step")
+            msg_text = update.message.text.strip()
+            if step == "awaiting_new_details":
+                edit_id = context.user_data.get("edit_product_id")
+                if not edit_id:
+                    await update.message.reply_text("❌ Product ID not found.")
+                    return
+                success = _update_product_details(edit_id, msg_text)
+                if not success:
+                    await update.message.reply_text("❌ Details update failed.")
+                    return
+                product = _get_product_by_id(edit_id)
+                context.user_data.pop("admin_flow", None)
+                context.user_data.pop("admin_step", None)
+                context.user_data.pop("edit_product_id", None)
+                name = product.get("name") if product else "Product"
+                await update.message.reply_text(f"✅ Details updated successfully!\n\nID: {edit_id}\n📦 {name}\n📝 New Details: {msg_text}")
                 return
 
     text = update.message.text.strip().lower()
@@ -451,34 +499,120 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         if not products:
             await query.edit_message_text("✏️ EDIT PRODUCT\n\nNo products available to edit.")
             return
-        keyboard = _get_edit_product_selection_keyboard(products)
+        keyboard = _get_product_selection_keyboard(products, "admin_edit_select_")
         await query.edit_message_text("✏️ EDIT PRODUCT\n\nSelect product to edit:", reply_markup=keyboard)
         return
 
     if data.startswith("admin_edit_select_"):
         try:
-            pid_str = data.replace("admin_edit_select_", "")
-            product_id = int(pid_str)
+            product_id = int(data.replace("admin_edit_select_", ""))
         except Exception:
             await query.edit_message_text("❌ Invalid product ID.")
             return
-
         product = _get_product_by_id(product_id)
         if not product:
             await query.edit_message_text("❌ Product not found.")
             return
-
         context.user_data["admin_flow"] = "edit_product"
         context.user_data["admin_step"] = "awaiting_edit_name"
         context.user_data["edit_product_id"] = product_id
         context.user_data["edit_temp"] = {}
-
         current_text = f"✏️ EDITING PRODUCT ID: {product_id}\n\nCurrent Details:\n📦 Name: {product.get('name')}\n💰 Price: {_format_price_display(str(product.get('price','')))}\n📝 Details: {product.get('details','')}\n\n➡️ కొత్త Product Name పంపండి:"
         await query.edit_message_text(current_text)
         return
 
+    if data == "admin_change_price":
+        products = _load_products()
+        if not products:
+            await query.edit_message_text("💰 CHANGE PRICE\n\nNo products available.")
+            return
+        keyboard = _get_product_selection_keyboard(products, "admin_changeprice_select_")
+        await query.edit_message_text("💰 CHANGE PRICE\n\nSelect product to change price:", reply_markup=keyboard)
+        return
+
+    if data.startswith("admin_changeprice_select_"):
+        try:
+            product_id = int(data.replace("admin_changeprice_select_", ""))
+        except Exception:
+            await query.edit_message_text("❌ Invalid product ID.")
+            return
+        product = _get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text("❌ Product not found.")
+            return
+        context.user_data["admin_flow"] = "change_price"
+        context.user_data["admin_step"] = "awaiting_new_price"
+        context.user_data["edit_product_id"] = product_id
+        await query.edit_message_text(f"💰 CHANGE PRICE - ID: {product_id}\n\nCurrent:\n📦 {product.get('name')}\n💰 {_format_price_display(str(product.get('price','')))}\n\n➡️ కొత్త Price పంపండి:")
+        return
+
+    if data == "admin_edit_details":
+        products = _load_products()
+        if not products:
+            await query.edit_message_text("📝 EDIT DETAILS\n\nNo products available.")
+            return
+        keyboard = _get_product_selection_keyboard(products, "admin_editdetails_select_")
+        await query.edit_message_text("📝 EDIT DETAILS\n\nSelect product to edit details:", reply_markup=keyboard)
+        return
+
+    if data.startswith("admin_editdetails_select_"):
+        try:
+            product_id = int(data.replace("admin_editdetails_select_", ""))
+        except Exception:
+            await query.edit_message_text("❌ Invalid product ID.")
+            return
+        product = _get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text("❌ Product not found.")
+            return
+        context.user_data["admin_flow"] = "edit_details"
+        context.user_data["admin_step"] = "awaiting_new_details"
+        context.user_data["edit_product_id"] = product_id
+        await query.edit_message_text(f"📝 EDIT DETAILS - ID: {product_id}\n\nCurrent:\n📦 {product.get('name')}\n📝 {product.get('details','')}\n\n➡️ కొత్త Details పంపండి:")
+        return
+
+    if data == "admin_delete_product":
+        products = _load_products()
+        if not products:
+            await query.edit_message_text("🗑️ DELETE PRODUCT\n\nNo products available.")
+            return
+        keyboard = _get_product_selection_keyboard(products, "admin_delete_select_")
+        await query.edit_message_text("🗑️ DELETE PRODUCT\n\nSelect product to delete:", reply_markup=keyboard)
+        return
+
+    if data.startswith("admin_delete_select_"):
+        try:
+            product_id = int(data.replace("admin_delete_select_", ""))
+        except Exception:
+            await query.edit_message_text("❌ Invalid product ID.")
+            return
+        product = _get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text("❌ Product not found.")
+            return
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"admin_delete_confirm_{product_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="admin_back")]
+        ])
+        await query.edit_message_text(f"⚠️ DELETE CONFIRMATION\n\nAre you sure you want to delete?\n\nID: {product_id}\n📦 {product.get('name')}\n💰 {_format_price_display(str(product.get('price','')))}\n\nThis action cannot be undone.", reply_markup=keyboard)
+        return
+
+    if data.startswith("admin_delete_confirm_"):
+        try:
+            product_id = int(data.replace("admin_delete_confirm_", ""))
+        except Exception:
+            await query.edit_message_text("❌ Invalid product ID.")
+            return
+        product = _get_product_by_id(product_id)
+        name = product.get("name") if product else f"ID {product_id}"
+        success = _delete_product(product_id)
+        if not success:
+            await query.edit_message_text("❌ Delete failed. Try again.")
+            return
+        await query.edit_message_text(f"🗑️ Product deleted successfully!\n\nDeleted: {name} (ID: {product_id})")
+        return
+
     if data == "admin_back":
-        # Back to admin panel
         context.user_data.pop("admin_flow", None)
         context.user_data.pop("admin_step", None)
         context.user_data.pop("edit_product_id", None)
@@ -486,15 +620,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("🔐 ADMIN PANEL\n\nWelcome Admin! కింద ఉన్న option ఎంచుకోండి 👇", reply_markup=_get_admin_keyboard())
         return
 
-    placeholders = {
-        "admin_change_price": "💰 Change Price\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
-        "admin_edit_details": "📝 Edit Details\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
-        "admin_delete_product": "🗑️ Delete Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
-    }
-    text = placeholders.get(data, "Product management feature త్వరలో అందుబాటులో ఉంటుంది.")
-    await query.edit_message_text(text)
+    await query.edit_message_text("Product management feature త్వరలో అందుబాటులో ఉంటుంది.")
 
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+# --- Telegram Application with updater(None) for custom webhook ---
+telegram_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("admin", admin_command))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
@@ -533,8 +662,20 @@ except Exception:
 
 WEBHOOK_PATH = "/telegram-webhook"
 
+def _get_webhook_secret():
+    # Support both names
+    return os.getenv("TELEGRAM_WEBHOOK_SECRET_TOKEN") or os.getenv("WEBHOOK_SECRET_TOKEN") or os.getenv("TELEGRAM_WEBHOOK_SECRET")
+
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
+    # --- Webhook Secret Security ---
+    secret = _get_webhook_secret()
+    if secret:
+        header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if header_secret != secret:
+            logger.warning("Webhook secret mismatch - rejecting request")
+            return "Forbidden", 403
+
     try:
         json_data = request.get_json(force=True)
         if not json_data:
@@ -568,9 +709,20 @@ def _register_webhook_if_needed():
             current = await telegram_app.bot.get_webhook_info()
             if current.url == webhook_url:
                 logger.info("Webhook already correctly configured: %s", webhook_url)
+                # Even if URL same, ensure secret_token is set if needed
+                secret = _get_webhook_secret()
+                if secret:
+                    # Check if secret needs update - set again with secret
+                    await telegram_app.bot.set_webhook(url=webhook_url, secret_token=secret, drop_pending_updates=False)
+                    logger.info("Webhook secret_token ensured")
                 return
-            await telegram_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
-            logger.info("Webhook set to: %s", webhook_url)
+            secret = _get_webhook_secret()
+            if secret:
+                await telegram_app.bot.set_webhook(url=webhook_url, secret_token=secret, drop_pending_updates=False)
+                logger.info("Webhook set with secret_token to: %s", webhook_url)
+            else:
+                await telegram_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
+                logger.info("Webhook set to: %s", webhook_url)
         future = asyncio.run_coroutine_threadsafe(_set(), telegram_loop)
         future.result(timeout=30)
     except Exception:
