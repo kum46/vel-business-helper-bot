@@ -34,24 +34,19 @@ def home():
 def health():
     return "OK"
 
-# --- TURSO STORAGE via HTTP API (No libsql package needed - uses only httpx) ---
-# This is 100% reliable on Render Free - httpx is in requirements.txt
-# Uses Turso HTTP pipeline API: https://docs.turso.tech/sdk/http/reference
-
+# --- TURSO STORAGE via HTTP API (uses only httpx) ---
 class _TursoResult:
     def __init__(self, rows):
-        self.rows = rows  # list of tuples/lists of python values
+        self.rows = rows
 
 class _TursoHttpClient:
     def __init__(self, db_url, auth_token):
         import httpx
         self._httpx = httpx
-        # libsql://xyz.turso.io -> https://xyz.turso.io
         https_url = db_url.strip()
         if https_url.startswith("libsql://"):
             https_url = "https://" + https_url[len("libsql://"):]
         https_url = https_url.rstrip("/")
-        # Turso HTTP API endpoint
         self._endpoint = f"{https_url}/v2/pipeline"
         self._auth_token = auth_token
 
@@ -101,29 +96,24 @@ class _TursoHttpClient:
             "Authorization": f"Bearer {self._auth_token}",
             "Content-Type": "application/json"
         }
-        try:
-            with self._httpx.Client(timeout=20.0) as client:
-                resp = client.post(self._endpoint, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-                # Parse response: data["results"][0]["response"]["result"]["rows"]
-                results = data.get("results", [])
-                if not results:
-                    return _TursoResult([])
-                first = results[0]
-                if first.get("type") == "error":
-                    err = first.get("error", {})
-                    raise RuntimeError(f"Turso error: {err}")
-                res_obj = first.get("response", {}).get("result", {})
-                raw_rows = res_obj.get("rows", [])
-                py_rows = []
-                for raw_row in raw_rows:
-                    # raw_row is list of hrana values
-                    py_row = tuple(self._from_hrana_value(v) for v in raw_row)
-                    py_rows.append(py_row)
-                return _TursoResult(py_rows)
-        except Exception as e:
-            raise e
+        with self._httpx.Client(timeout=20.0) as client:
+            resp = client.post(self._endpoint, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                return _TursoResult([])
+            first = results[0]
+            if first.get("type") == "error":
+                err = first.get("error", {})
+                raise RuntimeError(f"Turso error: {err}")
+            res_obj = first.get("response", {}).get("result", {})
+            raw_rows = res_obj.get("rows", [])
+            py_rows = []
+            for raw_row in raw_rows:
+                py_row = tuple(self._from_hrana_value(v) for v in raw_row)
+                py_rows.append(py_row)
+            return _TursoResult(py_rows)
 
 _turso_client = None
 _turso_lock = threading.Lock()
@@ -192,9 +182,7 @@ def _migrate_json_if_needed():
         if not isinstance(data, list) or not data:
             return
         result = _execute_turso("SELECT COUNT(*) FROM products")
-        count = 0
-        if result and result.rows:
-            count = result.rows[0][0] or 0
+        count = result.rows[0][0] if result and result.rows else 0
         if count > 0:
             logger.info("Turso already has products, skipping JSON migration")
             return
@@ -227,6 +215,16 @@ def _load_products():
         logger.exception("Failed to parse products")
         return []
 
+def _get_product_by_id(product_id):
+    result = _execute_turso("SELECT id, name, price, details FROM products WHERE id = ?", (product_id,))
+    if result is None or not result.rows:
+        return None
+    try:
+        r = result.rows[0]
+        return {"id": r[0], "name": r[1], "price": r[2], "details": r[3] if len(r) > 3 else ""}
+    except Exception:
+        return None
+
 def _add_product_to_turso(name, price, details):
     result = _execute_turso("INSERT INTO products (name, price, details) VALUES (?, ?, ?)", (name, price, details))
     if result is None:
@@ -239,6 +237,10 @@ def _add_product_to_turso(name, price, details):
     except Exception:
         logger.exception("Failed to get last insert id")
         return 1
+
+def _update_product_in_turso(product_id, name, price, details):
+    result = _execute_turso("UPDATE products SET name = ?, price = ?, details = ? WHERE id = ?", (name, price, details, product_id))
+    return result is not None
 
 def _format_price_display(price_str):
     try:
@@ -268,7 +270,17 @@ def _format_products_list(products):
         lines.append("")
     return "\n".join(lines).strip()
 
-# --- Existing Handlers (unchanged logic) ---
+def _get_edit_product_selection_keyboard(products):
+    keyboard = []
+    for p in products:
+        pid = p.get("id")
+        name = p.get("name", "Unknown")[:30]
+        # callback_data max 64 bytes, so keep short
+        keyboard.append([InlineKeyboardButton(f"{pid}. {name}", callback_data=f"admin_edit_select_{pid}")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin_back")])
+    return InlineKeyboardMarkup(keyboard)
+
+# --- Existing Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -297,6 +309,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id == ADMIN_USER_ID:
         flow = context.user_data.get("admin_flow")
+        # Add Product Flow
         if flow == "add_product":
             step = context.user_data.get("admin_step")
             msg_text = update.message.text.strip()
@@ -329,6 +342,53 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_display = _format_price_display(temp.get("price", ""))
                 await update.message.reply_text(f"✅ Product saved successfully!\n\nProduct:\n{temp.get('name')}\n\nPrice:\n{price_display}")
                 return
+
+        # Edit Product Flow - NEW
+        elif flow == "edit_product":
+            step = context.user_data.get("admin_step")
+            msg_text = update.message.text.strip()
+
+            if step == "awaiting_edit_name":
+                if not msg_text:
+                    await update.message.reply_text("Product name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    return
+                context.user_data["edit_temp"] = {"name": msg_text}
+                context.user_data["admin_step"] = "awaiting_edit_price"
+                await update.message.reply_text("💰 కొత్త Price పంపండి:")
+                return
+
+            elif step == "awaiting_edit_price":
+                if not msg_text:
+                    await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    return
+                context.user_data["edit_temp"]["price"] = msg_text
+                context.user_data["admin_step"] = "awaiting_edit_details"
+                await update.message.reply_text("📝 కొత్త Details పంపండి:")
+                return
+
+            elif step == "awaiting_edit_details":
+                edit_id = context.user_data.get("edit_product_id")
+                edit_temp = context.user_data.get("edit_temp", {})
+                edit_temp["details"] = msg_text
+
+                if not edit_id:
+                    await update.message.reply_text("❌ Product ID not found. /admin నుంచి మళ్ళీ ప్రయత్నించండి.")
+                    return
+
+                success = _update_product_in_turso(edit_id, edit_temp.get("name", ""), edit_temp.get("price", ""), edit_temp.get("details", ""))
+                if not success:
+                    await update.message.reply_text("❌ Database update failed. Turso connection check చేయండి.")
+                    return
+
+                context.user_data.pop("admin_flow", None)
+                context.user_data.pop("admin_step", None)
+                context.user_data.pop("edit_product_id", None)
+                context.user_data.pop("edit_temp", None)
+
+                price_display = _format_price_display(edit_temp.get("price", ""))
+                await update.message.reply_text(f"✅ Product updated successfully!\n\nID: {edit_id}\nProduct:\n{edit_temp.get('name')}\n\nPrice:\n{price_display}\n\nDetails:\n{edit_temp.get('details')}")
+                return
+
     text = update.message.text.strip().lower()
     if text in ["hi", "hello", "hey", "హాయ్", "హలో"]:
         await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.")
@@ -370,19 +430,63 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
     await query.answer()
     data = query.data
+
     if data == "admin_add_product":
         context.user_data["admin_flow"] = "add_product"
         context.user_data["admin_step"] = "awaiting_name"
         context.user_data.pop("temp_product", None)
+        context.user_data.pop("edit_product_id", None)
+        context.user_data.pop("edit_temp", None)
         await query.edit_message_text("➕ ADD PRODUCT\n\nProduct name పంపండి:")
         return
+
     if data == "admin_view_products":
         products = _load_products()
         text = _format_products_list(products)
         await query.edit_message_text(text)
         return
+
+    if data == "admin_edit_product":
+        products = _load_products()
+        if not products:
+            await query.edit_message_text("✏️ EDIT PRODUCT\n\nNo products available to edit.")
+            return
+        keyboard = _get_edit_product_selection_keyboard(products)
+        await query.edit_message_text("✏️ EDIT PRODUCT\n\nSelect product to edit:", reply_markup=keyboard)
+        return
+
+    if data.startswith("admin_edit_select_"):
+        try:
+            pid_str = data.replace("admin_edit_select_", "")
+            product_id = int(pid_str)
+        except Exception:
+            await query.edit_message_text("❌ Invalid product ID.")
+            return
+
+        product = _get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text("❌ Product not found.")
+            return
+
+        context.user_data["admin_flow"] = "edit_product"
+        context.user_data["admin_step"] = "awaiting_edit_name"
+        context.user_data["edit_product_id"] = product_id
+        context.user_data["edit_temp"] = {}
+
+        current_text = f"✏️ EDITING PRODUCT ID: {product_id}\n\nCurrent Details:\n📦 Name: {product.get('name')}\n💰 Price: {_format_price_display(str(product.get('price','')))}\n📝 Details: {product.get('details','')}\n\n➡️ కొత్త Product Name పంపండి:"
+        await query.edit_message_text(current_text)
+        return
+
+    if data == "admin_back":
+        # Back to admin panel
+        context.user_data.pop("admin_flow", None)
+        context.user_data.pop("admin_step", None)
+        context.user_data.pop("edit_product_id", None)
+        context.user_data.pop("edit_temp", None)
+        await query.edit_message_text("🔐 ADMIN PANEL\n\nWelcome Admin! కింద ఉన్న option ఎంచుకోండి 👇", reply_markup=_get_admin_keyboard())
+        return
+
     placeholders = {
-        "admin_edit_product": "✏️ Edit Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_change_price": "💰 Change Price\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_edit_details": "📝 Edit Details\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
         "admin_delete_product": "🗑️ Delete Product\n\nProduct management feature త్వరలో అందుబాటులో ఉంటుంది.",
