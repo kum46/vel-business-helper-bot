@@ -449,14 +449,13 @@ def _format_products_list(products):
     return "\n".join(lines).strip()
 
 def _format_customer_product(product):
-    pid = product.get("id")
-    name = product.get("name", "Unknown")
-    price = product.get("price", "")
-    details = product.get("details", "")
-    price_display = _format_price_display(str(price)) if price else "Not available"
-    lines = [f"ID: {pid}", f"📦 Product Name: {name}", f"💰 Price: {price_display}"]
-    if details:
-        lines.append(f"📝 Details: {details}")
+    name = product.get("name", "Unknown") or "Unknown"
+    price = product.get("price", "") or ""
+    details = product.get("details", "") or ""
+    price_display = _format_price_display(str(price)) if price and str(price).strip() else "Not available"
+    lines = [f"📦 Product Name: {name}", f"💰 Price: {price_display}"]
+    if details.strip():
+        lines.append(f"📝 Details: {details.strip()}")
     return "\n".join(lines)
 
 def _get_product_selection_keyboard(products, prefix, include_back=True):
@@ -492,9 +491,9 @@ def _get_business_settings_edit_keyboard():
 
 def _get_customer_main_keyboard():
     keyboard = [
-        [InlineKeyboardButton("🛠 Services", callback_data="services")],
-        [InlineKeyboardButton("💰 Price", callback_data="price")],
+        [InlineKeyboardButton("📦 Products & Prices", callback_data="price")],
         [InlineKeyboardButton("🏢 Business Info", callback_data="business_info")],
+        [InlineKeyboardButton("🛠 Services", callback_data="services")],
         [InlineKeyboardButton("🤖 About This Bot", callback_data="about")],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
@@ -503,7 +502,7 @@ def _get_customer_main_keyboard():
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇",
+        "👋 Welcome to Vel Business Helper!\n\nI help you browse products, check prices and details, send enquiries, and get business information.\n\nPlease choose an option below 👇",
         reply_markup=_get_customer_main_keyboard()
     )
 
@@ -694,19 +693,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if query.data == "services":
-        text = "🛠 SERVICES\n\n• Business information\n• Product information\n• Pump information\n• Customer enquiry support\n• Contact details\n\nమరిన్ని services త్వరలో add చేస్తాము."
+        text = (
+            "🛠 SERVICES\n\n"
+            "Vel Business Helper helps businesses provide information and support to their customers through Telegram.\n\n"
+            "✨ AVAILABLE SERVICES\n\n"
+            "• 📦 Product Catalog\n"
+            "• 💰 Product Prices\n"
+            "• 📝 Product Details\n"
+            "• 📩 Customer Enquiries\n"
+            "• 🏢 Business Information\n"
+            "• 📞 Save Business Contact\n"
+            "• ⚡ Automated Customer Support\n\n"
+            "Customers can browse products, check prices and details, send product enquiries, view business information and save the business contact."
+        )
         keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
     elif query.data == "price":
         products = _load_products()
         if not products:
-            text = "💰 PRICE INFORMATION\n\nNo products available yet.\nPlease check back later."
+            text = "📦 PRODUCTS & PRICES\n\nNo products available yet.\nPlease check back later."
             keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return
-        # Show product list with Enquire Now buttons
-        text = "💰 PRODUCTS - Tap Enquire to contact business\n\nSelect a product to enquire:"
+        lines = ["📦 PRODUCTS\n"]
+        for idx, p in enumerate(products, start=1):
+            name = p.get("name", "Unknown") or "Unknown"
+            price = p.get("price", "") or ""
+            details = p.get("details", "") or ""
+            price_display = _format_price_display(str(price)) if price and str(price).strip() else "Not available"
+            lines.append(f"{idx}.")
+            lines.append(f"📦 Product Name: {name}")
+            lines.append(f"💰 Price: {price_display}")
+            if details.strip():
+                lines.append(f"📝 Details: {details.strip()}")
+            lines.append("")
+        text = "\n".join(lines).strip()
+        if len(text) > 4000:
+            text = text[:4000] + "\n\n... and more products available. Tap a product below to enquire."
         keyboard = _get_customer_product_list_keyboard(products)
         await query.edit_message_text(text, reply_markup=keyboard)
         return
@@ -741,12 +765,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
+    elif query.data == "help":
+        text = (
+            "❓ HELP\n\n"
+            "How to use Vel Business Helper:\n\n"
+            "1️⃣ Open Products & Prices to view available products.\n\n"
+            "2️⃣ Products & Prices shows product name, price and details.\n\n"
+            "3️⃣ Choose a product and use 📩 Enquire Now to send an enquiry to the business.\n\n"
+            "4️⃣ Use 🏢 Business Info to view the business information.\n\n"
+            "5️⃣ After sending an enquiry, use 📞 Save Business Contact to receive the business contact card.\n\n"
+            "6️⃣ Use ⬅️ Back to Start to return to the main customer menu.\n\n"
+            "For any assistance, choose an option from the main menu or send a message to the bot."
+        )
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
     elif query.data == "back_to_start":
-        text = "👋 Welcome to Vel Business Helper!\n\nనేను మీ business కి సంబంధించిన basic information, services, prices మరియు contact details అందించడానికి సహాయం చేస్తాను.\n\nకింద ఉన్న option ఎంచుకోండి 👇"
+        text = "👋 Welcome to Vel Business Helper!\n\nI help you browse products, check prices and details, send enquiries, and get business information.\n\nPlease choose an option below 👇"
         await query.edit_message_text(text, reply_markup=_get_customer_main_keyboard())
         return
     else:
-        text = "❓ HELP\n\nమీకు కావాల్సిన విషయం message గా పంపండి.\n\nఉదాహరణలు:\n• Contact\n• Price\n• CRI pump\n• 1 HP pump\n• Services\n\n/start పంపితే main menu వస్తుంది."
+        text = "❓ HELP\n\nPlease choose an option from the main menu or use Products & Prices to browse available products.\n\n⬅️ Back to Start"
         keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
@@ -762,26 +801,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_text = update.message.text.strip()
             if step == "awaiting_name":
                 if not msg_text:
-                    await update.message.reply_text("Product name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    await update.message.reply_text("Product name cannot be empty. Please try again:")
                     return
                 context.user_data["temp_product"] = {"name": msg_text}
                 context.user_data["admin_step"] = "awaiting_price"
-                await update.message.reply_text("💰 Price పంపండి:")
+                await update.message.reply_text("💰 Please enter the price:")
                 return
             elif step == "awaiting_price":
                 if not msg_text:
-                    await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    await update.message.reply_text("Price cannot be empty. Please try again:")
                     return
                 context.user_data["temp_product"]["price"] = msg_text
                 context.user_data["admin_step"] = "awaiting_details"
-                await update.message.reply_text("📝 Product details పంపండి:")
+                await update.message.reply_text("📝 Please enter the product details:")
                 return
             elif step == "awaiting_details":
                 temp = context.user_data.get("temp_product", {})
                 temp["details"] = msg_text
                 new_id = _add_product_to_turso(temp.get("name", ""), temp.get("price", ""), temp.get("details", ""))
                 if new_id is None:
-                    await update.message.reply_text("❌ Database connection failed. Turso credentials check చేసి మళ్ళీ try చేయండి.")
+                    await update.message.reply_text("❌ Database connection failed.\nPlease check the database configuration and try again.")
                     return
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
@@ -794,26 +833,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_text = update.message.text.strip()
             if step == "awaiting_edit_name":
                 if not msg_text:
-                    await update.message.reply_text("Product name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    await update.message.reply_text("Product name cannot be empty. Please try again:")
                     return
                 context.user_data["edit_temp"] = {"name": msg_text}
                 context.user_data["admin_step"] = "awaiting_edit_price"
-                await update.message.reply_text("💰 కొత్త Price పంపండి:")
+                await update.message.reply_text("💰 Please enter the new price:")
                 return
             elif step == "awaiting_edit_price":
                 if not msg_text:
-                    await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    await update.message.reply_text("Price cannot be empty. Please try again:")
                     return
                 context.user_data["edit_temp"]["price"] = msg_text
                 context.user_data["admin_step"] = "awaiting_edit_details"
-                await update.message.reply_text("📝 కొత్త Details పంపండి:")
+                await update.message.reply_text("📝 Please enter the new details:")
                 return
             elif step == "awaiting_edit_details":
                 edit_id = context.user_data.get("edit_product_id")
                 edit_temp = context.user_data.get("edit_temp", {})
                 edit_temp["details"] = msg_text
                 if not edit_id:
-                    await update.message.reply_text("❌ Product ID not found. /admin నుంచి మళ్ళీ ప్రయత్నించండి.")
+                    await update.message.reply_text("❌ Product ID not found. Please try again from /admin.")
                     return
                 success = _update_product_in_turso(edit_id, edit_temp.get("name", ""), edit_temp.get("price", ""), edit_temp.get("details", ""))
                 if not success:
@@ -835,7 +874,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Product ID not found.")
                     return
                 if not msg_text:
-                    await update.message.reply_text("Price ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    await update.message.reply_text("Price cannot be empty. Please try again:")
                     return
                 success = _update_product_price(edit_id, msg_text)
                 if not success:
@@ -882,7 +921,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             field = field_map.get(step)
             if field:
                 if not msg_text and field in ["business_name"]:
-                    await update.message.reply_text("Business Name ఖాళీగా ఉండకూడదు. మళ్ళీ పంపండి:")
+                    await update.message.reply_text("Business Name cannot be empty. Please try again:")
                     return
                 success = _update_business_field(field, msg_text)
                 if not success:
@@ -898,8 +937,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     text_lower = text.lower()
 
-    if text_lower in ["hi", "hello", "hey", "హాయ్", "హలో"]:
-        await update.message.reply_text("👋 Hello!\n\nVel Business Helper కి Welcome!\n\n/start నొక్కండి.", reply_markup=_get_customer_main_keyboard())
+    if text_lower in ["hi", "hello", "hey"]:
+        await update.message.reply_text("👋 Hello!\n\nWelcome to Vel Business Helper!\n\nPlease press /start to open the main menu.", reply_markup=_get_customer_main_keyboard())
         return
 
     # Try product search first for customer
@@ -923,16 +962,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("🏢 BUSINESS INFORMATION\n\nBusiness information not yet configured.\nPlease contact admin.", reply_markup=_get_customer_main_keyboard())
         return
-    elif "price" in text_lower or "ధర" in text_lower:
+    elif "price" in text_lower:
         products = _load_products()
         if products:
             text_msg = "💰 PRODUCTS - Tap Enquire to contact business\n\nSelect a product to enquire:"
             keyboard = _get_customer_product_list_keyboard(products)
             await update.message.reply_text(text_msg, reply_markup=keyboard)
         else:
-            await update.message.reply_text("💰 Price తెలుసుకోవడానికి product/model పేరు పంపండి.\n\nఉదాహరణ:\nCRI 1 HP\nCRI 2 HP\nOpenwell pump", reply_markup=_get_customer_main_keyboard())
+            await update.message.reply_text("💰 To check prices, please send a product name.\n\nExamples:\nCRI 1 HP\nCRI 2 HP\nOpenwell pump", reply_markup=_get_customer_main_keyboard())
         return
-    elif "pump" in text_lower or "పంప్" in text_lower:
+    elif "pump" in text_lower:
         matched = _search_products(text)
         if matched:
             for prod in matched[:3]:
@@ -943,10 +982,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
                 await update.message.reply_text(prod_text, reply_markup=InlineKeyboardMarkup(keyboard))
             return
-        await update.message.reply_text("🔧 PUMP INFORMATION\n\nమీకు కావాల్సిన pump details కోసం model పేరు పంపండి.\n\nఉదాహరణ:\n1 HP pump\n2 HP pump\nOpenwell pump\nSubmersible pump", reply_markup=_get_customer_main_keyboard())
+        await update.message.reply_text("🔧 PRODUCT INFORMATION\n\nPlease send a product or model name to get details.\n\nExamples:\n1 HP pump\n2 HP pump\nOpenwell pump\nSubmersible pump", reply_markup=_get_customer_main_keyboard())
         return
     else:
-        await update.message.reply_text("🙂 మీ message అందింది.\n\nదయచేసి /start పంపి option ఎంచుకోండి.\n\nలేదా మీకు కావాల్సిన product పేరు పంపండి.", reply_markup=_get_customer_main_keyboard())
+        await update.message.reply_text("🙂 Message received.\n\nPlease send /start to open the main menu,\n\nor send a product name to search.", reply_markup=_get_customer_main_keyboard())
 
 async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Telegram handler error: %s", context.error, exc_info=context.error)
@@ -969,7 +1008,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_USER_ID:
         await update.message.reply_text("❌ You are not authorized to access the Admin Panel.")
         return
-    await update.message.reply_text("🔐 ADMIN PANEL\n\nWelcome Admin! కింద ఉన్న option ఎంచుకోండి 👇", reply_markup=_get_admin_keyboard())
+    await update.message.reply_text("🔐 ADMIN PANEL\n\nWelcome Admin! Please select an option below 👇", reply_markup=_get_admin_keyboard())
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -986,7 +1025,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop("temp_product", None)
         context.user_data.pop("edit_product_id", None)
         context.user_data.pop("edit_temp", None)
-        await query.edit_message_text("➕ ADD PRODUCT\n\nProduct name పంపండి:")
+        await query.edit_message_text("➕ ADD PRODUCT\n\nPlease enter the product name:")
         return
 
     if data == "admin_view_products":
@@ -1019,7 +1058,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["admin_step"] = "awaiting_edit_name"
         context.user_data["edit_product_id"] = product_id
         context.user_data["edit_temp"] = {}
-        current_text = f"✏️ EDITING PRODUCT ID: {product_id}\n\nCurrent Details:\n📦 Name: {product.get('name')}\n💰 Price: {_format_price_display(str(product.get('price','')))}\n📝 Details: {product.get('details','')}\n\n➡️ కొత్త Product Name పంపండి:"
+        current_text = f"✏️ EDITING PRODUCT ID: {product_id}\n\nCurrent Details:\n📦 Name: {product.get('name')}\n💰 Price: {_format_price_display(str(product.get('price','')))}\n📝 Details: {product.get('details','')}\n\n➡️ Please enter the new product name:"
         await query.edit_message_text(current_text)
         return
 
@@ -1045,7 +1084,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["admin_flow"] = "change_price"
         context.user_data["admin_step"] = "awaiting_new_price"
         context.user_data["edit_product_id"] = product_id
-        await query.edit_message_text(f"💰 CHANGE PRICE - ID: {product_id}\n\nCurrent:\n📦 {product.get('name')}\n💰 {_format_price_display(str(product.get('price','')))}\n\n➡️ కొత్త Price పంపండి:")
+        await query.edit_message_text(f"💰 CHANGE PRICE - ID: {product_id}\n\nCurrent:\n📦 {product.get('name')}\n💰 {_format_price_display(str(product.get('price','')))}\n\n➡️ Please enter the new price:")
         return
 
     if data == "admin_edit_details":
@@ -1070,7 +1109,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["admin_flow"] = "edit_details"
         context.user_data["admin_step"] = "awaiting_new_details"
         context.user_data["edit_product_id"] = product_id
-        await query.edit_message_text(f"📝 EDIT DETAILS - ID: {product_id}\n\nCurrent:\n📦 {product.get('name')}\n📝 {product.get('details','')}\n\n➡️ కొత్త Details పంపండి:")
+        await query.edit_message_text(f"📝 EDIT DETAILS - ID: {product_id}\n\nCurrent:\n📦 {product.get('name')}\n📝 {product.get('details','')}\n\n➡️ Please enter the new details:")
         return
 
     if data == "admin_delete_product":
@@ -1126,32 +1165,32 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "admin_biz_edit_name":
         context.user_data["admin_flow"] = "business_settings"
         context.user_data["admin_step"] = "awaiting_biz_name"
-        await query.edit_message_text("🏢 EDIT BUSINESS NAME\n\nCurrent Business Name will be replaced.\n\n➡️ కొత్త Business Name పంపండి:")
+        await query.edit_message_text("🏢 EDIT BUSINESS NAME\n\nCurrent Business Name will be replaced.\n\n➡️ Please enter the new business name:")
         return
     if data == "admin_biz_edit_address":
         context.user_data["admin_flow"] = "business_settings"
         context.user_data["admin_step"] = "awaiting_biz_address"
-        await query.edit_message_text("📍 EDIT ADDRESS\n\n➡️ కొత్త Address పంపండి:")
+        await query.edit_message_text("📍 EDIT ADDRESS\n\n➡️ Please enter the new address:")
         return
     if data == "admin_biz_edit_phone":
         context.user_data["admin_flow"] = "business_settings"
         context.user_data["admin_step"] = "awaiting_biz_phone"
-        await query.edit_message_text("📞 EDIT PHONE\n\n➡️ కొత్త Phone Number పంపండి:")
+        await query.edit_message_text("📞 EDIT PHONE\n\n➡️ Please enter the new phone number:")
         return
     if data == "admin_biz_edit_whatsapp":
         context.user_data["admin_flow"] = "business_settings"
         context.user_data["admin_step"] = "awaiting_biz_whatsapp"
-        await query.edit_message_text("📱 EDIT WHATSAPP\n\n➡️ కొత్త WhatsApp Number పంపండి:")
+        await query.edit_message_text("📱 EDIT WHATSAPP\n\n➡️ Please enter the new WhatsApp number:")
         return
     if data == "admin_biz_edit_email":
         context.user_data["admin_flow"] = "business_settings"
         context.user_data["admin_step"] = "awaiting_biz_email"
-        await query.edit_message_text("📧 EDIT EMAIL\n\n➡️ కొత్త Email పంపండి:")
+        await query.edit_message_text("📧 EDIT EMAIL\n\n➡️ Please enter the new email address:")
         return
     if data == "admin_biz_edit_desc":
         context.user_data["admin_flow"] = "business_settings"
         context.user_data["admin_step"] = "awaiting_biz_desc"
-        await query.edit_message_text("📝 EDIT DESCRIPTION\n\n➡️ కొత్త Business Description పంపండి:")
+        await query.edit_message_text("📝 EDIT DESCRIPTION\n\n➡️ Please enter the new business description:")
         return
 
     # --- NEW: Customer Enquiries ---
@@ -1278,10 +1317,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop("edit_product_id", None)
         context.user_data.pop("edit_temp", None)
         context.user_data.pop("biz_field", None)
-        await query.edit_message_text("🔐 ADMIN PANEL\n\nWelcome Admin! కింద ఉన్న option ఎంచుకోండి 👇", reply_markup=_get_admin_keyboard())
+        await query.edit_message_text("🔐 ADMIN PANEL\n\nWelcome Admin! Please select an option below 👇", reply_markup=_get_admin_keyboard())
         return
 
-    await query.edit_message_text("Product management feature త్వరలో అందుబాటులో ఉంటుంది.")
+    await query.edit_message_text("This product management feature will be available soon.")
 
 # --- Telegram Application with updater(None) for custom webhook ---
 telegram_app = Application.builder().token(BOT_TOKEN).updater(None).build()
