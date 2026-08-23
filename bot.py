@@ -512,6 +512,73 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     await query.answer()
 
+    # --- SAVE BUSINESS CONTACT (Customer only) ---
+    if query.data == "save_business_contact":
+        try:
+            settings = _get_business_settings()
+            if settings is None:
+                await query.message.reply_text(
+                    "❌ Business phone number is not available.\n\nPlease contact the business directly.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]])
+                )
+                return
+
+            raw_phone = (settings.get("phone") or "").strip()
+            business_name = (settings.get("business_name") or "").strip()
+
+            if not business_name:
+                business_name = "Business"
+
+            # Normalize phone only for sending (do not modify DB)
+            cleaned_phone = "".join(ch for ch in raw_phone if ch.isdigit() or ch == "+")
+            # Remove spaces, dashes, brackets already handled; keep + and digits
+            if cleaned_phone.startswith("+"):
+                # keep plus
+                digits = "".join(ch for ch in cleaned_phone[1:] if ch.isdigit())
+                cleaned_phone = "+" + digits
+            else:
+                cleaned_phone = "".join(ch for ch in cleaned_phone if ch.isdigit())
+
+            if not cleaned_phone or len(cleaned_phone) < 7:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="❌ Business phone number is not available.\n\nPlease contact the business directly.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]])
+                )
+                return
+
+            # First name is required by Telegram API, truncate to 32 chars
+            first_name = business_name[:32] if business_name else "Business"
+
+            # Send contact card - PTB 20.7 compatible
+            await context.bot.send_contact(
+                chat_id=query.message.chat_id,
+                phone_number=cleaned_phone,
+                first_name=first_name
+            )
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    "📞 Business Contact\n\n"
+                    "The business contact has been sent.\n\n"
+                    "Please tap \"Add Contact\" in Telegram to save it to your contacts."
+                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]])
+            )
+        except Exception as e:
+            logger.exception("Failed to send business contact card: %s", e)
+            try:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="❌ Could not send business contact.\n\nPlease try again later.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]])
+                )
+            except Exception:
+                pass
+        return
+
+
     # Customer Product Enquiry - Confirmation Screen
     if query.data.startswith("cust_enq_"):
         # cust_enq_{id} -> confirmation
@@ -563,13 +630,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logger.exception("Failed to send admin notification for enquiry %s", enq_id)
 
-            # Customer confirmation
+            # Customer confirmation with Save Business Contact
             customer_confirm = (
                 f"✅ Enquiry Sent Successfully!\n\n"
                 f"📦 Product: {product.get('name')}\n\n"
                 f"The business admin will contact you soon."
             )
-            keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+            keyboard = [
+                [InlineKeyboardButton("📞 Save Business Contact", callback_data="save_business_contact")],
+                [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]
+            ]
             await query.edit_message_text(customer_confirm, reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
