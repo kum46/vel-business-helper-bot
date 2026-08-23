@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import threading
 import logging
@@ -281,20 +282,82 @@ def _add_product_to_turso(name, price, details):
         return 1
 
 def _update_product_in_turso(product_id, name, price, details):
+    # Verify exists before update
+    existing = _get_product_by_id(product_id)
+    if existing is None:
+        return False
     result = _execute_turso("UPDATE products SET name = ?, price = ?, details = ? WHERE id = ?", (name, price, details, product_id))
-    return result is not None
+    if result is None:
+        return False
+    # Verify after update
+    try:
+        updated = _get_product_by_id(product_id)
+        if updated is None:
+            return False
+        # Verify fields contain new values (compare stripped)
+        if str(updated.get("name", "")).strip() != str(name).strip():
+            return False
+        if str(updated.get("price", "")).strip() != str(price).strip():
+            return False
+        if str(updated.get("details", "")).strip() != str(details).strip():
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to verify product update for ID %s", product_id)
+        return False
 
 def _update_product_price(product_id, price):
+    existing = _get_product_by_id(product_id)
+    if existing is None:
+        return False
     result = _execute_turso("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
-    return result is not None
+    if result is None:
+        return False
+    try:
+        updated = _get_product_by_id(product_id)
+        if updated is None:
+            return False
+        if str(updated.get("price", "")).strip() != str(price).strip():
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to verify price update for ID %s", product_id)
+        return False
 
 def _update_product_details(product_id, details):
+    existing = _get_product_by_id(product_id)
+    if existing is None:
+        return False
     result = _execute_turso("UPDATE products SET details = ? WHERE id = ?", (details, product_id))
-    return result is not None
+    if result is None:
+        return False
+    try:
+        updated = _get_product_by_id(product_id)
+        if updated is None:
+            return False
+        if str(updated.get("details", "")).strip() != str(details).strip():
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to verify details update for ID %s", product_id)
+        return False
 
 def _delete_product(product_id):
+    existing = _get_product_by_id(product_id)
+    if existing is None:
+        return False
     result = _execute_turso("DELETE FROM products WHERE id = ?", (product_id,))
-    return result is not None
+    if result is None:
+        return False
+    try:
+        # Verify deletion
+        after = _get_product_by_id(product_id)
+        if after is not None:
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to verify product deletion for ID %s", product_id)
+        return False
 
 # Business Settings
 def _get_business_settings():
@@ -318,10 +381,28 @@ def _get_business_settings():
 def _update_business_field(field, value):
     allowed = {"business_name", "address", "phone", "whatsapp", "email", "description"}
     if field not in allowed:
+        logger.warning("Attempt to update disallowed business field: %s", field)
         return False
     sql = f"UPDATE business_settings SET {field} = ? WHERE id = 1"
     result = _execute_turso(sql, (value,))
-    return result is not None
+    if result is None:
+        return False
+    try:
+        # Verify that the new value was actually saved
+        verify_res = _execute_turso(f"SELECT {field} FROM business_settings WHERE id = 1")
+        if verify_res is None or not verify_res.rows:
+            return False
+        saved_value = verify_res.rows[0][0]
+        # Compare - allow None vs empty handling
+        if saved_value is None:
+            saved_value = ""
+        if str(saved_value).strip() != str(value).strip():
+            logger.warning("Business field verification failed for %s: expected '%s' got '%s'", field, value, saved_value)
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to verify business field update for %s", field)
+        return False
 
 # Enquiries
 def _create_enquiry(product_id, product_name, product_price, customer_name, telegram_user_id, username):
@@ -387,8 +468,24 @@ def _update_enquiry_status(enq_id, status):
     return result is not None
 
 def _delete_enquiry(enq_id):
+    try:
+        res = _execute_turso("SELECT id FROM enquiries WHERE id = ?", (enq_id,))
+        if res is None or not res.rows:
+            return False
+    except Exception:
+        logger.exception("Failed to check enquiry existence for ID %s", enq_id)
+        return False
     result = _execute_turso("DELETE FROM enquiries WHERE id = ?", (enq_id,))
-    return result is not None
+    if result is None:
+        return False
+    try:
+        res2 = _execute_turso("SELECT id FROM enquiries WHERE id = ?", (enq_id,))
+        if res2 is not None and res2.rows:
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to verify enquiry deletion for ID %s", enq_id)
+        return False
 
 def _format_business_settings_admin(settings):
     lines = ["⚙️ BUSINESS SETTINGS\n"]
@@ -420,7 +517,8 @@ def _format_business_settings_customer(settings):
 
 def _format_price_display(price_str):
     try:
-        clean = price_str.replace(",", "").strip()
+        clean = str(price_str).replace(",", "").replace("₹", "").replace("Rs.", "").replace("Rs", "").strip()
+        clean = clean.replace(" ", "")
         num = float(clean)
         if num.is_integer():
             return f"₹{int(num):,}"
@@ -428,6 +526,99 @@ def _format_price_display(price_str):
             return f"₹{num:,.2f}"
     except Exception:
         return f"₹{price_str}"
+
+def _validate_price(value: str):
+    """
+    Validate price: accepts 100, 12500.50, 12,500, ₹12500, ₹12,500
+    Rejects abc, empty, zero, negative
+    Returns (is_valid: bool, normalized_float_or_None)
+    """
+    if value is None:
+        return False, None
+    raw = str(value).strip()
+    if not raw:
+        return False, None
+    # Remove common currency symbols and spaces
+    cleaned = raw.replace("₹", "").replace("Rs.", "").replace("Rs", "").replace(",", "").strip()
+    cleaned = cleaned.replace(" ", "")
+    if not cleaned:
+        return False, None
+    # Reject if contains letters
+    # Allow only digits and at most one dot
+    if not re.match(r'^-?\d+(\.\d+)?$', cleaned):
+        return False, None
+    try:
+        num = float(cleaned)
+        if num <= 0:
+            return False, None
+        # Reasonable upper limit to avoid absurd values
+        if num > 1000000000:  # 100 crores
+            return False, None
+        return True, num
+    except Exception:
+        return False, None
+
+def _validate_phone(value: str):
+    """
+    Reasonable phone validation: allows +919876543210, 9876543210, +91 98765 43210
+    Rejects abc, 123, 12345
+    Returns True if valid
+    """
+    if value is None:
+        return False
+    raw = str(value).strip()
+    if not raw:
+        return False
+    # Reject if contains letters
+    if re.search(r'[A-Za-z]', raw):
+        return False
+    # Keep only digits and +
+    # Allow spaces, dashes, brackets for input but check digits count
+    digits = re.sub(r'\D', '', raw)
+    if len(digits) < 7 or len(digits) > 15:
+        return False
+    # Reject too short obvious invalid like 123, 12345
+    if len(digits) <= 5:
+        return False
+    # Must have at least 7 digits
+    return True
+
+def _validate_whatsapp(value: str):
+    # Same as phone for our use case
+    return _validate_phone(value)
+
+def _validate_email(value: str):
+    """
+    Simple email validation. Empty allowed only if caller decides (optional).
+    """
+    if value is None:
+        return False
+    raw = str(value).strip()
+    if not raw:
+        return False  # caller should check optional empty before calling
+    # Basic email regex
+    # No spaces, one @, has dot after @
+    if ' ' in raw:
+        return False
+    if raw.count('@') != 1:
+        return False
+    local, domain = raw.split('@')
+    if not local or not domain:
+        return False
+    if '.' not in domain:
+        return False
+    if domain.startswith('.') or domain.endswith('.'):
+        return False
+    if local.startswith('.') or local.endswith('.'):
+        return False
+    # Simple pattern
+    if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', raw):
+        return False
+    # Reject obvious invalid like business@ or @example.com (already covered)
+    if len(raw) < 6:
+        return False
+    return True
+
 
 def _format_products_list(products):
     if not products:
@@ -811,6 +1002,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not msg_text:
                     await update.message.reply_text("Price cannot be empty. Please try again:")
                     return
+                is_valid, _ = _validate_price(msg_text)
+                if not is_valid:
+                    await update.message.reply_text(
+                        "❌ Invalid price.\n\nPlease enter a valid positive price.\n\nExamples:\n12500\n12500.50\n₹12,500\n\nPlease try again:"
+                    )
+                    return
                 context.user_data["temp_product"]["price"] = msg_text
                 context.user_data["admin_step"] = "awaiting_details"
                 await update.message.reply_text("📝 Please enter the product details:")
@@ -843,6 +1040,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not msg_text:
                     await update.message.reply_text("Price cannot be empty. Please try again:")
                     return
+                is_valid, _ = _validate_price(msg_text)
+                if not is_valid:
+                    await update.message.reply_text(
+                        "❌ Invalid price.\n\nPlease enter a valid positive price.\n\nExamples:\n12500\n12500.50\n₹12,500\n\nPlease try again:"
+                    )
+                    return
                 context.user_data["edit_temp"]["price"] = msg_text
                 context.user_data["admin_step"] = "awaiting_edit_details"
                 await update.message.reply_text("📝 Please enter the new details:")
@@ -854,9 +1057,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not edit_id:
                     await update.message.reply_text("❌ Product ID not found. Please try again from /admin.")
                     return
+                # Verify product exists before update
+                existing_check = _get_product_by_id(edit_id)
+                if existing_check is None:
+                    await update.message.reply_text("❌ Product not found.\n\nPlease try again.")
+                    context.user_data.pop("admin_flow", None)
+                    context.user_data.pop("admin_step", None)
+                    context.user_data.pop("edit_product_id", None)
+                    context.user_data.pop("edit_temp", None)
+                    return
                 success = _update_product_in_turso(edit_id, edit_temp.get("name", ""), edit_temp.get("price", ""), edit_temp.get("details", ""))
                 if not success:
-                    await update.message.reply_text("❌ Database update failed.")
+                    # Check if product still exists to give accurate message
+                    verify = _get_product_by_id(edit_id)
+                    if verify is None:
+                        await update.message.reply_text("❌ Product not found.\n\nPlease try again.")
+                    else:
+                        await update.message.reply_text("❌ Product update could not be verified.\nPlease try again.")
                     return
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
@@ -876,16 +1093,40 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not msg_text:
                     await update.message.reply_text("Price cannot be empty. Please try again:")
                     return
+                is_valid, _ = _validate_price(msg_text)
+                if not is_valid:
+                    await update.message.reply_text(
+                        "❌ Invalid price.\n\nPlease enter a valid positive price.\n\nExamples:\n12500\n12500.50\n₹12,500\n\nPlease try again:"
+                    )
+                    return
+                # Verify product exists before update
+                existing = _get_product_by_id(edit_id)
+                if existing is None:
+                    await update.message.reply_text("❌ Product not found.\n\nPlease try again.")
+                    context.user_data.pop("admin_flow", None)
+                    context.user_data.pop("admin_step", None)
+                    context.user_data.pop("edit_product_id", None)
+                    return
                 success = _update_product_price(edit_id, msg_text)
                 if not success:
                     await update.message.reply_text("❌ Price update failed.")
                     return
                 product = _get_product_by_id(edit_id)
+                if product is None:
+                    await update.message.reply_text("❌ Product not found.\n\nPlease try again.")
+                    context.user_data.pop("admin_flow", None)
+                    context.user_data.pop("admin_step", None)
+                    context.user_data.pop("edit_product_id", None)
+                    return
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
                 context.user_data.pop("edit_product_id", None)
                 price_display = _format_price_display(msg_text)
                 name = product.get("name") if product else "Product"
+                # Verify price
+                if str(product.get("price", "")).strip() != str(msg_text).strip():
+                    await update.message.reply_text("❌ Product update could not be verified.\nPlease try again.")
+                    return
                 await update.message.reply_text(f"✅ Price updated successfully!\n\nID: {edit_id}\n📦 {name}\n💰 New Price: {price_display}")
                 return
         elif flow == "edit_details":
@@ -901,10 +1142,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Details update failed.")
                     return
                 product = _get_product_by_id(edit_id)
+                if product is None:
+                    await update.message.reply_text("❌ Product not found.\n\nPlease try again.")
+                    context.user_data.pop("admin_flow", None)
+                    context.user_data.pop("admin_step", None)
+                    context.user_data.pop("edit_product_id", None)
+                    return
                 context.user_data.pop("admin_flow", None)
                 context.user_data.pop("admin_step", None)
                 context.user_data.pop("edit_product_id", None)
                 name = product.get("name") if product else "Product"
+                if str(product.get("details", "")).strip() != str(msg_text).strip():
+                    await update.message.reply_text("❌ Product update could not be verified.\nPlease try again.")
+                    return
                 await update.message.reply_text(f"✅ Details updated successfully!\n\nID: {edit_id}\n📦 {name}\n📝 New Details: {msg_text}")
                 return
         elif flow == "business_settings":
@@ -920,9 +1170,34 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             field = field_map.get(step)
             if field:
-                if not msg_text and field in ["business_name"]:
-                    await update.message.reply_text("Business Name cannot be empty. Please try again:")
+                # Business Name and Address must not be empty
+                if not msg_text and field in ["business_name", "address"]:
+                    if field == "business_name":
+                        await update.message.reply_text("Business Name cannot be empty. Please try again:")
+                    else:
+                        await update.message.reply_text("Address cannot be empty. Please try again:")
                     return
+                # Phone validation
+                if field == "phone" and msg_text:
+                    if not _validate_phone(msg_text):
+                        await update.message.reply_text(
+                            "❌ Invalid phone number.\n\nPlease enter a valid phone number.\n\nExamples:\n9876543210\n+919876543210\n\nPlease try again:"
+                        )
+                        return
+                # WhatsApp validation
+                if field == "whatsapp" and msg_text:
+                    if not _validate_whatsapp(msg_text):
+                        await update.message.reply_text(
+                            "❌ Invalid WhatsApp number.\n\nPlease enter a valid WhatsApp number.\n\nExamples:\n9876543210\n+919876543210\n\nPlease try again:"
+                        )
+                        return
+                # Email validation - allow empty if optional, but validate if provided
+                if field == "email" and msg_text:
+                    if not _validate_email(msg_text):
+                        await update.message.reply_text(
+                            "❌ Invalid email address.\n\nPlease enter a valid email address.\n\nPlease try again:"
+                        )
+                        return
                 success = _update_business_field(field, msg_text)
                 if not success:
                     await update.message.reply_text("❌ Database connection failed. Please try again.")
@@ -1145,12 +1420,20 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text("❌ Invalid product ID.")
             return
         product = _get_product_by_id(product_id)
-        name = product.get("name") if product else f"ID {product_id}"
+        if product is None:
+            await query.edit_message_text("❌ Product not found.\n\nPlease try again.")
+            return
+        name = product.get("name", f"ID {product_id}")
         success = _delete_product(product_id)
         if not success:
-            await query.edit_message_text("❌ Delete failed. Try again.")
+            # Verify if still exists
+            still = _get_product_by_id(product_id)
+            if still is not None:
+                await query.edit_message_text("❌ Product deletion could not be verified.\nPlease try again.")
+            else:
+                await query.edit_message_text("❌ Delete failed. Try again.")
             return
-        await query.edit_message_text(f"🗑️ Product deleted successfully!\n\nDeleted: {name} (ID: {product_id})")
+        await query.edit_message_text(f"🗑️ Product deleted successfully!\n\nDeleted:\n{name}\n\nID:\n{product_id}")
         return
 
     if data == "admin_business_settings":
@@ -1276,11 +1559,21 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             except Exception:
                 await query.edit_message_text("❌ Invalid enquiry ID.")
                 return
+            # Verify exists before delete
+            existing_enq = _get_enquiry_by_id(enq_id)
+            if existing_enq is None:
+                await query.edit_message_text("❌ Enquiry not found.\n\nPlease try again.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
+                return
             success = _delete_enquiry(enq_id)
             if not success:
-                await query.edit_message_text("❌ Delete failed.")
+                # Check if still exists
+                still = _get_enquiry_by_id(enq_id)
+                if still is not None:
+                    await query.edit_message_text("❌ Enquiry deletion could not be verified.\nPlease try again.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
+                else:
+                    await query.edit_message_text("❌ Delete failed.\nPlease try again.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
                 return
-            await query.edit_message_text(f"🗑️ Enquiry ID {enq_id} deleted successfully.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
+            await query.edit_message_text("🗑️ Enquiry deleted successfully!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Enquiries", callback_data="admin_enquiries")]]))
             return
         elif data.startswith("admin_enq_del_no"):
             # Cancel delete
