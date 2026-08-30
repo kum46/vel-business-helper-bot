@@ -905,12 +905,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "🔎 SEARCH PRODUCTS\n\n"
             "Type a product name, model, category, or keyword to search.\n\n"
-            "Examples:\n"
-            "• watch\n"
-            "• pump\n"
-            "• 1 HP\n"
-            "• CRI\n"
-            "• openwell\n\n"
             "Just type your search term and I will show matching products."
         )
         keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
