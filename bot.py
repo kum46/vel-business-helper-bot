@@ -7,7 +7,7 @@ from datetime import datetime
 
 from flask import Flask, request
 from telegram import Update
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -682,6 +682,7 @@ def _get_business_settings_edit_keyboard():
 
 def _get_customer_main_keyboard():
     keyboard = [
+        [InlineKeyboardButton("🔎 Search Products", callback_data="customer_search")],
         [InlineKeyboardButton("📦 Products & Prices", callback_data="price")],
         [InlineKeyboardButton("🏢 Business Info", callback_data="business_info")],
         [InlineKeyboardButton("🛠 Services", callback_data="services")],
@@ -896,6 +897,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 📞 Save Business Contact\n"
             "• ⚡ Automated Customer Support\n\n"
             "Customers can browse products, check prices and details, send product enquiries, view business information and save the business contact."
+        )
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    elif query.data == "customer_search":
+        text = (
+            "🔎 SEARCH PRODUCTS\n\n"
+            "Type a product name, model, category, or keyword to search.\n\n"
+            "Examples:\n"
+            "• watch\n"
+            "• pump\n"
+            "• 1 HP\n"
+            "• CRI\n"
+            "• openwell\n\n"
+            "Just type your search term and I will show matching products."
         )
         keyboard = [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1636,6 +1652,32 @@ telegram_thread.start()
 async def _init_telegram():
     await telegram_app.initialize()
     await telegram_app.start()
+    try:
+        # Set default commands for all users - only /start visible
+        default_commands = [
+            BotCommand("start", "Open main menu - browse products & business info")
+        ]
+        await telegram_app.bot.set_my_commands(
+            commands=default_commands,
+            scope=BotCommandScopeDefault()
+        )
+        logger.info("Default bot commands set: /start")
+
+        # Set admin commands only for ADMIN_USER_ID chat scope
+        try:
+            admin_commands = [
+                BotCommand("start", "Open main menu"),
+                BotCommand("admin", "Open Admin Panel (admin only)")
+            ]
+            await telegram_app.bot.set_my_commands(
+                commands=admin_commands,
+                scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID)
+            )
+            logger.info("Admin bot commands set for admin chat %s", ADMIN_USER_ID)
+        except Exception:
+            logger.exception("Failed to set admin scoped commands - admin menu will still be protected by ADMIN_USER_ID check")
+    except Exception:
+        logger.exception("Failed to set bot commands - continuing without command menu")
 
 async def _shutdown_telegram():
     try:
