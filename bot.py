@@ -21,7 +21,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is missing")
 
-ADMIN_USER_ID = 8804669460
+ADMIN_USER_ID_ENV = os.getenv("ADMIN_USER_ID")
+if not ADMIN_USER_ID_ENV:
+    raise RuntimeError("ADMIN_USER_ID environment variable is missing")
+try:
+    ADMIN_USER_ID = int(ADMIN_USER_ID_ENV.strip())
+except ValueError:
+    raise RuntimeError("ADMIN_USER_ID must be a numeric Telegram user ID")
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger("VelBusinessHelper")
